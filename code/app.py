@@ -8,22 +8,23 @@ import threading
 import time
 import requests
 import matplotlib
-matplotlib.use('Agg')  # 非GUI后端
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
 import base64
+import os
 
 app = Flask(__name__)
 CORS(app)
 
 # ============ 配置参数 ============
 SAMPLE_RATE = 44100
-CHIRP_DURATION = 0.1      # Chirp主体时长
-MARKER_DURATION = 0.03    # 🆕 前导音/尾音时长
+CHIRP_DURATION = 0.1
+MARKER_DURATION = 0.03
 FREQ_START = 17000
 FREQ_END = 20000
-MARKER_FREQ_START = 1000  # 🆕 前导音频率（低频，易检测）
-MARKER_FREQ_END = 2000    # 🆕 尾音频率
+MARKER_FREQ_START = 1000
+MARKER_FREQ_END = 2000
 SOUND_SPEED = 343
 
 # ============ 全局变量 ============
@@ -34,114 +35,83 @@ recording = False
 audio_buffer = []
 my_delta_t = None
 measurement_lock = threading.Lock()
-last_correlation_plot = None  # 🆕 保存相关函数图用于调试
+last_correlation_plot = None
 
 # ============ 信号生成 ============
 def generate_marker_tone(frequency, duration):
-    """生成标记音（正弦波）"""
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration))
-    # 使用汉宁窗避免突变
     window = np.hanning(len(t))
     tone = np.sin(2 * np.pi * frequency * t) * window
-    return tone * 0.3  # 降低音量避免削波
+    return tone * 0.3
 
 def generate_chirp_body():
-    """生成Chirp主体"""
     t = np.linspace(0, CHIRP_DURATION, int(SAMPLE_RATE * CHIRP_DURATION))
     chirp = signal.chirp(t, f0=FREQ_START, f1=FREQ_END, t1=CHIRP_DURATION, method='linear')
     return chirp * 0.5
 
 def generate_complete_signal():
-    """
-    🆕 生成完整的三段式信号：
-    [前导音(1kHz, 30ms)] + [Chirp(17-20kHz, 100ms)] + [尾音(2kHz, 30ms)]
-    """
     marker_start = generate_marker_tone(MARKER_FREQ_START, MARKER_DURATION)
     chirp_body = generate_chirp_body()
     marker_end = generate_marker_tone(MARKER_FREQ_END, MARKER_DURATION)
-    
-    # 拼接三段信号
     complete_signal = np.concatenate([marker_start, chirp_body, marker_end])
     
     print(f"📊 信号长度: {len(complete_signal)/SAMPLE_RATE:.3f}s")
-    print(f"   - 前导音: {MARKER_DURATION*1000:.0f}ms @ {MARKER_FREQ_START}Hz")
-    print(f"   - Chirp: {CHIRP_DURATION*1000:.0f}ms @ {FREQ_START}-{FREQ_END}Hz")
-    print(f"   - 尾音: {MARKER_DURATION*1000:.0f}ms @ {MARKER_FREQ_END}Hz")
-    
     return complete_signal
 
-# ============ 改进的信号检测 ============
+# ============ 信号检测 ============
 def bandpass_filter(data, lowcut, highcut, order=4):
-    """带通滤波器"""
     nyq = SAMPLE_RATE / 2
     low = lowcut / nyq
     high = highcut / nyq
     b, a = signal.butter(order, [low, high], btype='band')
     return signal.filtfilt(b, a, data)
 
-def detect_signal_improved(audio_data, template_signal, min_distance_samples=None):
-    """
-    🆕 改进的信号检测算法
-    
-    流程：
-    1. 对录音信号进行带通滤波（保留17-20kHz）
-    2. 计算与模板信号的互相关
-    3. 找到所有显著峰值
-    4. 返回前N个最强峰值的时间位置
-    """
+def detect_signal_improved(audio_data, template_signal):
     if len(audio_data) < len(template_signal):
         print("❌ 录音长度不足")
-        return []
+        return [], None
     
-    # 1. 带通滤波（保留chirp频率范围）
+    # 带通滤波
     filtered_audio = bandpass_filter(audio_data, FREQ_START-1000, FREQ_END+1000)
     
-    # 2. 计算互相关
+    # 计算互相关
     correlation = signal.correlate(filtered_audio, template_signal, mode='valid')
-    correlation = np.abs(correlation)  # 取绝对值
-    
-    # 3. 归一化
+    correlation = np.abs(correlation)
     correlation = correlation / np.max(correlation)
     
-    # 4. 寻找峰值
-    # 设置最小距离（避免检测到同一信号的多个峰值）
-    if min_distance_samples is None:
-        min_distance_samples = int(SAMPLE_RATE * 0.05)  # 最小间隔50ms
-    
-    # 动态阈值：相对于最大值的比例
-    threshold = 0.4
+    # 寻找峰值
+    min_distance_samples = int(SAMPLE_RATE * 0.05)
+    threshold = 0.3  # 🔧 降低阈值，提高灵敏度
     
     peaks, properties = find_peaks(
         correlation, 
         height=threshold,
         distance=min_distance_samples,
-        prominence=0.1  # 峰值显著性
+        prominence=0.05
     )
     
     if len(peaks) == 0:
         print(f"❌ 未检测到峰值（阈值={threshold}）")
-        return []
+        return [], correlation
     
-    # 5. 按峰值高度排序，取前N个
+    # 按高度排序
     peak_heights = properties['peak_heights']
-    sorted_indices = np.argsort(peak_heights)[::-1]  # 降序
+    sorted_indices = np.argsort(peak_heights)[::-1]
     sorted_peaks = peaks[sorted_indices]
     
-    # 转换为时间（秒）
     peak_times = sorted_peaks / SAMPLE_RATE
     peak_values = peak_heights[sorted_indices]
     
     print(f"✅ 检测到 {len(peaks)} 个峰值:")
-    for i, (t, v) in enumerate(zip(peak_times[:5], peak_values[:5])):  # 只显示前5个
+    for i, (t, v) in enumerate(zip(peak_times[:5], peak_values[:5])):
         print(f"   峰值{i+1}: t={t:.4f}s, 强度={v:.3f}")
     
     return peak_times, correlation
 
 def plot_correlation(correlation, peaks_samples, save_path='/tmp/correlation.png'):
-    """
-    🆕 绘制相关函数图用于调试
-    """
     try:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
         plt.figure(figsize=(12, 4))
         time_axis = np.arange(len(correlation)) / SAMPLE_RATE
         
@@ -152,7 +122,6 @@ def plot_correlation(correlation, peaks_samples, save_path='/tmp/correlation.png
             peak_values = correlation[peaks_samples.astype(int)]
             plt.plot(peak_times, peak_values, 'ro', markersize=8, label='检测到的峰值')
             
-            # 标注前3个峰值
             for i, (t, v) in enumerate(zip(peak_times[:3], peak_values[:3])):
                 plt.annotate(f'峰{i+1}\n{t:.3f}s', 
                            xy=(t, v), 
@@ -181,17 +150,20 @@ def audio_callback(indata, frames, time_info, status):
     if recording:
         audio_buffer.extend(indata[:, 0].tolist())
 
-# ============ 核心测量函数 ============
-def measure_time_diff():
+# ============ 🆕 改进的测量函数（轮流发送） ============
+def measure_round_trip_time(is_initiator=True):
     """
-    🆕 改进的测量流程
-    """
-    global recording, audio_buffer, my_delta_t, last_correlation_plot
+    改进的测距流程：轮流发送，避免干扰
     
-    # 生成完整信号
+    参数：
+        is_initiator: True表示发起方（先发送），False表示响应方（先接收）
+    
+    返回：
+        (t_send, t_receive): 发送时间和接收时间（相对于录音开始）
+    """
+    global recording, audio_buffer, last_correlation_plot
+    
     complete_signal = generate_complete_signal()
-    
-    # 为检测准备模板（只用chirp主体部分）
     chirp_template = generate_chirp_body()
     
     audio_buffer = []
@@ -205,16 +177,39 @@ def measure_time_diff():
     )
     stream.start()
     
-    # 短暂延迟后播放
-    time.sleep(0.1)
+    t_send = None
+    t_receive = None
     
-    print("📢 发送信号...")
-    t_send = time.time()
-    sd.play(complete_signal, SAMPLE_RATE)
-    sd.wait()
-    
-    print("⏱️  等待接收对方信号...")
-    time.sleep(2.5)  # 延长录音时间
+    if is_initiator:
+        # 🔹 发起方：先发送，后接收
+        print("📤 [发起方] 先发送信号...")
+        time.sleep(0.2)  # 短暂延迟让录音稳定
+        
+        t_send_wall = time.time()
+        sd.play(complete_signal, SAMPLE_RATE)
+        sd.wait()
+        
+        # 记录发送时间（相对于录音开始）
+        t_send = len(audio_buffer) / SAMPLE_RATE
+        
+        print(f"   发送完成，继续录音等待对方信号...")
+        time.sleep(1.5)  # 等待对方发送信号
+        
+    else:
+        # 🔹 响应方：先接收，后发送
+        print("📥 [响应方] 先等待对方信号...")
+        time.sleep(0.7)  # 等待对方发送（0.2延迟 + 0.16信号 + 0.3余量）
+        
+        print("📤 [响应方] 现在发送信号...")
+        t_send_wall = time.time()
+        sd.play(complete_signal, SAMPLE_RATE)
+        sd.wait()
+        
+        # 记录发送时间
+        t_send = len(audio_buffer) / SAMPLE_RATE
+        
+        print(f"   发送完成，继续录音...")
+        time.sleep(0.8)  # 继续录音
     
     recording = False
     stream.stop()
@@ -222,66 +217,58 @@ def measure_time_diff():
     
     print(f"📊 录音完成，数据长度: {len(audio_buffer)/SAMPLE_RATE:.2f}s")
     
-    # 分析录音
+    # 分析录音，找到接收到的信号
     audio_data = np.array(audio_buffer)
     
     if len(audio_data) < len(chirp_template):
         print("❌ 录音数据不足")
-        return None, None, None
+        return None, None
     
-    # 🆕 使用改进的检测算法
     peak_times, correlation = detect_signal_improved(audio_data, chirp_template)
     
-    if len(peak_times) < 2:
-        print(f"❌ 检测到的峰值不足2个（需要至少2个）")
-        
-        # 绘制相关函数图用于调试
-        if len(peak_times) > 0:
-            # 转换回采样点
+    if len(peak_times) == 0:
+        print(f"❌ 未检测到任何信号")
+        return None, None
+    
+    # 🔧 关键修改：区分自己的信号和对方的信号
+    if is_initiator:
+        # 发起方：第一个峰值是自己的，第二个是对方的
+        if len(peak_times) < 2:
+            print(f"❌ 只检测到自己的信号，未收到对方信号")
+            # 绘图调试
             peaks_samples = (peak_times * SAMPLE_RATE).astype(int)
-            peaks_in_correlation = peaks_samples - len(chirp_template) + 1
-            peaks_in_correlation = peaks_in_correlation[peaks_in_correlation >= 0]
-            peaks_in_correlation = peaks_in_correlation[peaks_in_correlation < len(correlation)]
-            
-            if len(peaks_in_correlation) > 0:
-                plot_correlation(correlation, peaks_in_correlation)
+            peaks_in_corr = peaks_samples - len(chirp_template) + 1
+            peaks_in_corr = peaks_in_corr[(peaks_in_corr >= 0) & (peaks_in_corr < len(correlation))]
+            if len(peaks_in_corr) > 0:
+                plot_correlation(correlation, peaks_in_corr)
+            return None, None
         
-        return None, None, None
+        t_receive = peak_times[1]  # 第二个峰值是对方的信号
+        print(f"✅ [发起方] 检测到对方信号:")
+        print(f"   自己发送: t={t_send:.4f}s")
+        print(f"   对方到达: t={t_receive:.4f}s")
+        
+    else:
+        # 响应方：第一个峰值是对方的，第二个是自己的
+        if len(peak_times) < 1:
+            print(f"❌ 未检测到对方信号")
+            return None, None
+        
+        t_receive = peak_times[0]  # 第一个峰值是对方的信号
+        print(f"✅ [响应方] 检测到对方信号:")
+        print(f"   对方到达: t={t_receive:.4f}s")
+        print(f"   自己发送: t={t_send:.4f}s")
     
-    # 取前两个最强峰值
-    t1 = peak_times[0]  # 自己的信号
-    t3 = peak_times[1]  # 对方的信号
-    
-    # 🆕 验证峰值合理性
-    time_diff = t3 - t1
-    
-    # 理论上，时间差应该在合理范围内
-    # 如果距离是10米，往返时间约 = 2*10/343 ≈ 0.058秒
-    # 所以时间差应该在 0.01 到 0.5 秒之间比较合理
-    if time_diff < 0.005 or time_diff > 1.0:
-        print(f"⚠️  警告: 时间差 {time_diff:.4f}s 超出合理范围 [0.005, 1.0]")
-        print(f"   这可能表示信号检测错误")
-    
-    delta_t = time_diff
-    my_delta_t = delta_t
-    
-    print(f"✅ 测量完成:")
-    print(f"   t1 (自己的信号) = {t1:.4f}s")
-    print(f"   t3 (对方的信号) = {t3:.4f}s")
-    print(f"   Δt = t3 - t1 = {delta_t:.4f}s")
-    
-    # 🆕 绘制相关函数图
+    # 绘图
     peaks_samples = (peak_times[:5] * SAMPLE_RATE).astype(int)
-    # 调整到correlation的索引空间
-    peaks_in_correlation = peaks_samples - len(chirp_template) + 1
-    peaks_in_correlation = peaks_in_correlation[peaks_in_correlation >= 0]
-    peaks_in_correlation = peaks_in_correlation[peaks_in_correlation < len(correlation)]
+    peaks_in_corr = peaks_samples - len(chirp_template) + 1
+    peaks_in_corr = peaks_in_corr[(peaks_in_corr >= 0) & (peaks_in_corr < len(correlation))]
     
-    if len(peaks_in_correlation) > 0:
-        plot_path = plot_correlation(correlation, peaks_in_correlation)
+    if len(peaks_in_corr) > 0:
+        plot_path = plot_correlation(correlation, peaks_in_corr)
         last_correlation_plot = plot_path
     
-    return delta_t, t1, t3
+    return t_send, t_receive
 
 # ============ Web路由 ============
 @app.route('/')
@@ -299,74 +286,79 @@ def set_config():
 
 @app.route('/start_ranging', methods=['POST'])
 def start_ranging():
-    """测距流程"""
-    global my_delta_t
+    """🆕 改进的测距流程"""
+    global my_delta_t, device_role
     
     with measurement_lock:
         print("=" * 60)
-        print("🎯 开始测距流程...")
+        print(f"🎯 开始测距流程 [角色: {device_role}]")
         
-        # 步骤1：测量本地时间差
-        delta_t_A, t1, t3 = measure_time_diff()
+        # 🔧 根据角色决定发送顺序
+        is_initiator = (device_role == "anchor")
         
-        if delta_t_A is None:
+        # 步骤1：测量往返时间
+        t_send, t_receive = measure_round_trip_time(is_initiator)
+        
+        if t_send is None or t_receive is None:
             return jsonify({
-                "error": "本地信号检测失败，请检查：\n1. 两设备是否同时点击开始\n2. 音量是否足够\n3. 环境是否过于嘈杂"
+                "error": "信号检测失败！\n可能原因：\n1. 两设备未同时启动\n2. 距离过远\n3. 环境噪声过大\n4. 音量不足"
             })
         
-        # 步骤2：等待对方完成测量
-        print("⏳ 等待3秒让对方完成测量...")
-        time.sleep(3)
+        # 计算本地时间差
+        delta_t_local = abs(t_receive - t_send)
+        my_delta_t = delta_t_local
         
-        # 步骤3：请求对方的时间差
+        print(f"📊 本地测量:")
+        print(f"   发送时间: {t_send:.4f}s")
+        print(f"   接收时间: {t_receive:.4f}s")
+        print(f"   时间差 Δt: {delta_t_local:.4f}s")
+        
+        # 步骤2：等待对方完成测量
+        print("⏳ 等待对方完成测量...")
+        time.sleep(2)
+        
+        # 步骤3：获取对方的时间差
         if not peer_ip:
             return jsonify({
-                "delta_t_A": round(delta_t_A, 4),
-                "t1": round(t1, 4),
-                "t3": round(t3, 4),
-                "error": "未配置对方IP"
+                "delta_t_A": round(delta_t_local, 4),
+                "t_send": round(t_send, 4),
+                "t_receive": round(t_receive, 4),
+                "error": "未配置对方IP，无法计算距离"
             })
         
         try:
-            print(f"📡 请求对方时间差: {peer_ip}:5000")
+            print(f"📡 请求对方时间差...")
             response = requests.get(
                 f"http://{peer_ip}:5000/get_my_delta",
                 timeout=5
             )
             data = response.json()
-            delta_t_B = data.get("delta_t", None)
+            delta_t_peer = data.get("delta_t", None)
             
-            if delta_t_B is None:
+            if delta_t_peer is None:
                 return jsonify({
-                    "delta_t_A": round(delta_t_A, 4),
-                    "t1": round(t1, 4),
-                    "t3": round(t3, 4),
+                    "delta_t_A": round(delta_t_local, 4),
+                    "t_send": round(t_send, 4),
+                    "t_receive": round(t_receive, 4),
                     "error": "对方尚未完成测量"
                 })
             
             # 步骤4：计算距离
-            distance = (SOUND_SPEED / 2) * abs(delta_t_A - delta_t_B)
-            
-            # 🆕 合理性检查
-            if distance > 20:
-                print(f"⚠️  警告: 计算距离 {distance:.3f}m 过大")
-                print(f"   可能的原因:")
-                print(f"   1. 信号检测到了错误的峰值（回声）")
-                print(f"   2. 两设备的时间差测量不准确")
-                print(f"   3. 环境干扰严重")
+            # 公式: d = (c/2) * |Δt_A - Δt_B|
+            distance = (SOUND_SPEED / 2) * abs(delta_t_local - delta_t_peer)
             
             print(f"📏 计算结果:")
-            print(f"   Δt_A = {delta_t_A:.4f}s")
-            print(f"   Δt_B = {delta_t_B:.4f}s")
+            print(f"   本地 Δt = {delta_t_local:.4f}s")
+            print(f"   对方 Δt = {delta_t_peer:.4f}s")
             print(f"   距离 = {distance:.3f}m")
             print("=" * 60)
             
             return jsonify({
                 "distance": round(distance, 3),
-                "delta_t_A": round(delta_t_A, 4),
-                "delta_t_B": round(delta_t_B, 4),
-                "t1": round(t1, 4),
-                "t3": round(t3, 4)
+                "delta_t_A": round(delta_t_local, 4),
+                "delta_t_B": round(delta_t_peer, 4),
+                "t_send": round(t_send, 4),
+                "t_receive": round(t_receive, 4)
             })
             
         except requests.Timeout:
@@ -376,9 +368,7 @@ def start_ranging():
 
 @app.route('/get_my_delta', methods=['GET'])
 def get_my_delta():
-    """返回本地已测量的时间差"""
     global my_delta_t
-    
     print(f"📨 收到查询请求，本地Δt = {my_delta_t}")
     
     if my_delta_t is not None:
@@ -388,7 +378,6 @@ def get_my_delta():
 
 @app.route('/test_signal', methods=['POST'])
 def test_signal():
-    """测试信号播放"""
     complete_signal = generate_complete_signal()
     sd.play(complete_signal, SAMPLE_RATE)
     sd.wait()
@@ -396,7 +385,6 @@ def test_signal():
 
 @app.route('/get_correlation_plot', methods=['GET'])
 def get_correlation_plot():
-    """🆕 获取最后一次的相关函数图（调试用）"""
     global last_correlation_plot
     
     if last_correlation_plot and os.path.exists(last_correlation_plot):
@@ -407,18 +395,14 @@ def get_correlation_plot():
         return jsonify({"error": "无可用图像"}), 404
 
 if __name__ == '__main__':
-    import os
-    
     print("=" * 60)
-    print("🚀 声波测距系统启动（改进版）")
+    print("🚀 声波测距系统启动（轮流发送版）")
     print("📡 监听地址: http://0.0.0.0:5000")
     print("=" * 60)
-    print("\n🔧 改进点:")
-    print("  ✓ 三段式信号（前导音+Chirp+尾音）")
-    print("  ✓ 改进的峰值检测算法")
-    print("  ✓ 带通滤波降噪")
-    print("  ✓ 相关函数可视化（调试用）")
-    print("  ✓ 合理性检查与警告")
+    print("\n🔧 关键改进:")
+    print("  ✓ 轮流发送策略（避免相互干扰）")
+    print("  ✓ Anchor先发送，Target后发送")
+    print("  ✓ 改进的信号区分逻辑")
     print("=" * 60 + "\n")
     
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)

@@ -6,17 +6,16 @@ from scipy import signal
 import threading
 import time
 import requests
-import json
 
 app = Flask(__name__)
 CORS(app)
 
 # ============ 配置参数 ============
 SAMPLE_RATE = 44100
-CHIRP_DURATION = 0.1  # 100ms
+CHIRP_DURATION = 0.1
 FREQ_START = 17000
 FREQ_END = 20000
-SOUND_SPEED = 343  # m/s
+SOUND_SPEED = 343
 
 # ============ 全局变量 ============
 device_role = "anchor"
@@ -24,19 +23,17 @@ peer_ip = ""
 last_distance = None
 recording = False
 audio_buffer = []
-my_delta_t = None  # 🆕 存储本地测量的时间差
+my_delta_t = None
+measurement_lock = threading.Lock()  # 🆕 防止并发测量
 
 # ============ 信号生成 ============
 def generate_chirp():
-    """生成Chirp信号"""
     t = np.linspace(0, CHIRP_DURATION, int(SAMPLE_RATE * CHIRP_DURATION))
     chirp = signal.chirp(t, f0=FREQ_START, f1=FREQ_END, t1=CHIRP_DURATION, method='linear')
-    chirp = chirp * 0.5
-    return chirp
+    return chirp * 0.5
 
 # ============ 信号检测 ============
 def detect_chirp(audio_data, template):
-    """使用互相关检测Chirp信号"""
     if len(audio_data) < len(template):
         return None
     
@@ -47,33 +44,27 @@ def detect_chirp(audio_data, template):
     peaks, _ = signal.find_peaks(correlation, height=threshold, distance=int(SAMPLE_RATE*0.05))
     
     if len(peaks) > 0:
-        peak_sample = peaks[0]
-        peak_time = peak_sample / SAMPLE_RATE
-        return peak_time
+        return peaks[0] / SAMPLE_RATE
     return None
 
 # ============ 音频录制回调 ============
 def audio_callback(indata, frames, time_info, status):
-    """音频录制回调函数"""
     global audio_buffer
     if recording:
         audio_buffer.extend(indata[:, 0].tolist())
 
-# ============ 测距流程 ============
-def ranging_process(is_initiator=True):
+# ============ 核心测量函数 ============
+def measure_time_diff():
     """
-    完整的测距流程
-    is_initiator: True表示主动发起测距的设备，False表示被动响应
+    🆕 只负责测量本地的时间差，不做任何网络请求
     """
-    global last_distance, recording, audio_buffer, my_delta_t
+    global recording, audio_buffer, my_delta_t
     
     template = generate_chirp()
-    
-    # 清空缓冲区
     audio_buffer = []
     recording = True
     
-    # 开始录音
+    print("🎤 开始录音...")
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
@@ -81,15 +72,13 @@ def ranging_process(is_initiator=True):
     )
     stream.start()
     
-    # 等待一小段时间
     time.sleep(0.1)
     
-    # 发送Chirp信号
-    t_send = time.time()
+    print("📢 发送Chirp信号...")
     sd.play(template, SAMPLE_RATE)
     sd.wait()
     
-    # 继续录音2秒
+    print("⏱️  等待接收对方信号...")
     time.sleep(2)
     
     recording = False
@@ -99,55 +88,20 @@ def ranging_process(is_initiator=True):
     # 分析录音
     audio_data = np.array(audio_buffer)
     
-    # 检测自己的信号
-    t1_local = detect_chirp(audio_data[:int(SAMPLE_RATE*0.5)], template)
+    t1 = detect_chirp(audio_data[:int(SAMPLE_RATE*0.5)], template)
+    t3 = detect_chirp(audio_data[int(SAMPLE_RATE*0.5):], template)
     
-    # 检测对方的信号
-    t3_local = detect_chirp(audio_data[int(SAMPLE_RATE*0.5):], template)
+    if t1 is None or t3 is None:
+        print(f"❌ 信号检测失败: t1={t1}, t3={t3}")
+        return None, None, None
     
-    if t1_local is None or t3_local is None:
-        return {"error": "Signal detection failed", "t1": t1_local, "t3": t3_local}
+    t3 = t3 + 0.5
+    delta_t = t3 - t1
+    my_delta_t = delta_t
     
-    # 调整t3时间
-    t3_local = t3_local + 0.5
+    print(f"✅ 测量完成: Δt={delta_t:.4f}s, t1={t1:.4f}s, t3={t3:.4f}s")
     
-    delta_t_A = t3_local - t1_local
-    my_delta_t = delta_t_A  # 🆕 保存自己的时间差
-    
-    # 🆕 只有主动发起的设备才去请求对方的时间差
-    if is_initiator and peer_ip:
-        try:
-            # 等待对方完成测量（给2秒时间）
-            time.sleep(2.5)
-            
-            response = requests.post(
-                f"http://{peer_ip}:5000/get_time_diff", 
-                json={"delta_t": delta_t_A}, 
-                timeout=5
-            )
-            data = response.json()
-            delta_t_B = data.get("delta_t_B", 0)
-            
-            # 计算距离
-            distance = (SOUND_SPEED / 2) * abs(delta_t_A - delta_t_B)
-            last_distance = distance
-            
-            return {
-                "distance": round(distance, 3),
-                "delta_t_A": round(delta_t_A, 4),
-                "delta_t_B": round(delta_t_B, 4),
-                "t1": round(t1_local, 4),
-                "t3": round(t3_local, 4)
-            }
-        except Exception as e:
-            return {"error": str(e)}
-    
-    # 🆕 被动响应的设备只返回本地时间差
-    return {
-        "delta_t_A": round(delta_t_A, 4),
-        "t1": round(t1_local, 4),
-        "t3": round(t3_local, 4)
-    }
+    return delta_t, t1, t3
 
 # ============ Web路由 ============
 @app.route('/')
@@ -160,54 +114,104 @@ def set_config():
     data = request.json
     device_role = data.get('role', 'anchor')
     peer_ip = data.get('peer_ip', '')
-    print(f"✅ 配置已更新 - 角色: {device_role}, 对方IP: {peer_ip}")
+    print(f"✅ 配置更新: 角色={device_role}, 对方IP={peer_ip}")
     return jsonify({"status": "ok", "role": device_role, "peer_ip": peer_ip})
 
 @app.route('/start_ranging', methods=['POST'])
 def start_ranging():
-    """主动发起测距"""
-    print("🎯 开始测距...")
-    result = ranging_process(is_initiator=True)
-    return jsonify(result)
-
-@app.route('/get_time_diff', methods=['POST'])
-def get_time_diff():
     """
-    🆕 修改：被动接收对方的时间差，返回自己已测量的时间差
-    不再触发新的测距！
+    🆕 新流程：
+    1. 立即测量本地时间差
+    2. 等待3秒（让对方也完成测量）
+    3. 请求对方的时间差
+    4. 计算距离
     """
     global my_delta_t
     
-    data = request.json
-    delta_t_A = data.get("delta_t", 0)
+    with measurement_lock:
+        print("=" * 60)
+        print("🎯 开始测距流程...")
+        
+        # 步骤1：测量本地时间差
+        delta_t_A, t1, t3 = measure_time_diff()
+        
+        if delta_t_A is None:
+            return jsonify({"error": "本地信号检测失败"})
+        
+        # 步骤2：等待对方完成测量
+        print("⏳ 等待3秒让对方完成测量...")
+        time.sleep(3)
+        
+        # 步骤3：请求对方的时间差
+        if not peer_ip:
+            return jsonify({
+                "delta_t_A": round(delta_t_A, 4),
+                "t1": round(t1, 4),
+                "t3": round(t3, 4),
+                "error": "未配置对方IP"
+            })
+        
+        try:
+            print(f"📡 请求对方时间差: {peer_ip}:5000")
+            response = requests.get(
+                f"http://{peer_ip}:5000/get_my_delta",  # 🆕 改为GET请求
+                timeout=5
+            )
+            data = response.json()
+            delta_t_B = data.get("delta_t", None)
+            
+            if delta_t_B is None:
+                return jsonify({
+                    "delta_t_A": round(delta_t_A, 4),
+                    "t1": round(t1, 4),
+                    "t3": round(t3, 4),
+                    "error": "对方尚未完成测量"
+                })
+            
+            # 步骤4：计算距离
+            distance = (SOUND_SPEED / 2) * abs(delta_t_A - delta_t_B)
+            
+            print(f"📏 计算结果:")
+            print(f"   Δt_A = {delta_t_A:.4f}s")
+            print(f"   Δt_B = {delta_t_B:.4f}s")
+            print(f"   距离 = {distance:.3f}m")
+            print("=" * 60)
+            
+            return jsonify({
+                "distance": round(distance, 3),
+                "delta_t_A": round(delta_t_A, 4),
+                "delta_t_B": round(delta_t_B, 4),
+                "t1": round(t1, 4),
+                "t3": round(t3, 4)
+            })
+            
+        except requests.Timeout:
+            return jsonify({"error": "请求超时，请检查网络连接"})
+        except Exception as e:
+            return jsonify({"error": f"网络错误: {str(e)}"})
 
-    print(f"=" * 50)
-    print(f"📨 收到请求: /get_time_diff")
-    print(f"   对方时间差: {delta_t_A}")
-    print(f"   本地时间差: {my_delta_t}")
-    print(f"=" * 50)
+@app.route('/get_my_delta', methods=['GET'])  # 🆕 改为GET，简化逻辑
+def get_my_delta():
+    """返回本地已测量的时间差"""
+    global my_delta_t
     
-    # 🆕 直接返回之前保存的时间差，不再调用 ranging_process
+    print(f"📨 收到查询请求，本地Δt = {my_delta_t}")
     
     if my_delta_t is not None:
-        response = {"delta_t_B": my_delta_t}
-        print(f"✅ 返回: {response}")
-        return jsonify(response)
+        return jsonify({"delta_t": my_delta_t})
     else:
-        print(f"❌ 错误: 本地尚未完成测距")
-        return jsonify({"error": "本地尚未完成测距"}), 400
+        return jsonify({"error": "本地尚未完成测量"}), 400
 
 @app.route('/test_signal', methods=['POST'])
 def test_signal():
-    """测试信号发送"""
     chirp = generate_chirp()
     sd.play(chirp, SAMPLE_RATE)
     sd.wait()
     return jsonify({"status": "Signal sent"})
 
 if __name__ == '__main__':
-    print("=" * 50)
+    print("=" * 60)
     print("🚀 声波测距系统启动")
-    print("📡 访问地址: http://localhost:5000")
-    print("=" * 50)
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    print("📡 监听地址: http://0.0.0.0:5000")
+    print("=" * 60)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, use_reloader=False)

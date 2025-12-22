@@ -247,3 +247,29 @@ def plot_detection_result(recorded_data, chirp_ref, detected_time, correlation,
         print(f"  [调试] 已保存图像: debug_audio/{signal_name}_detection.png")
     except Exception as e:
         print(f"  [调试] 绘图失败: {e}")
+
+def calculate_distance_beepbeep(delta_A, delta_B):
+    """BeepBeep算法计算距离 - 带校准补偿"""
+    # 原始距离计算
+    raw_distance = (SOUND_SPEED / 2) * abs(delta_A - delta_B) + DEVICE_OFFSET_A + DEVICE_OFFSET_B
+    
+    # 应用系统延迟补偿
+    # 延迟会让时间差变大，所以要减去对应的距离偏移
+    calibrated_distance = raw_distance - (SOUND_SPEED * SYSTEM_DELAY_OFFSET)
+    
+    return max(0, calibrated_distance)
+
+def calculate_calibration_offset(measured_distance, true_distance):
+    """计算系统延迟偏移量
+    
+    Args:
+        measured_distance: 测量得到的距离（米）
+        true_distance: 实际已知距离（米）
+    
+    Returns:
+        system_delay_offset: 系统延迟（秒）
+    """
+    distance_error = measured_distance - true_distance
+    # 距离误差转换为时间误差
+    time_offset = distance_error / SOUND_SPEED
+    return time_offset

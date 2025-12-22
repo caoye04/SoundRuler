@@ -20,7 +20,7 @@ class TargetDeviceCLI:
         self.running = True
 
     def log(self, msg):
-        timestamp = time.strftime("%H:%M:%S.%f")[:-3]
+        timestamp = time.strftime("%H:%M:%S")[:-3]
         print(f"[{timestamp}] [目标设备] {msg}")
 
     def connect(self):

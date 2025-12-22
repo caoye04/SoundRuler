@@ -4,17 +4,25 @@ from scipy.signal import hilbert
 from .config import *
 
 def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_RATE):
-    """生成线性调频信号，添加窗函数减少边缘效应"""
+    """生成线性调频信号（Chirp）"""
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    
-    # 生成线性调频信号
     chirp_signal = signal.chirp(t, f_start, duration, f_end, method='linear')
     
-    # 添加汉宁窗减少边缘效应
-    window = signal.hann(len(chirp_signal))
+    # 修改这一行：使用 signal.windows.hann 或者 np.hanning
+    try:
+        # 尝试新版本的scipy
+        window = signal.windows.hann(len(chirp_signal))
+    except AttributeError:
+        # 如果新版本不存在，尝试旧版本
+        try:
+            window = signal.hann(len(chirp_signal))
+        except AttributeError:
+            # 如果都不存在，使用numpy的版本
+            window = np.hanning(len(chirp_signal))
+    
     chirp_signal = chirp_signal * window
     
-    # 归一化
+    # 归一化到 [-1, 1] 范围
     chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.8
     
     return chirp_signal.astype(np.float32)

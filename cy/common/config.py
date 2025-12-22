@@ -1,0 +1,44 @@
+# BeepBeep 声波测距配置文件 - 改进版
+
+# 网络配置
+SERVER_IP = "0.0.0.0"
+SERVER_PORT = 20000
+
+# 音频配置
+SAMPLE_RATE = 44100
+CHANNELS = 1
+CHUNK_SIZE = 4410
+
+# 信号参数
+CHIRP_DURATION = 0.8
+FREQ_A_START = 2000
+FREQ_A_END = 4000
+FREQ_B_START = 4500
+FREQ_B_END = 6500
+
+# 时序参数
+TOTAL_RECORD_TIME = 8.0
+CHIRP_B_DELAY = 4.0
+PRE_RECORD_BUFFER = 0.5
+
+# 物理参数
+SOUND_SPEED = 343.0
+DEVICE_OFFSET_A = 0.0
+DEVICE_OFFSET_B = 0.0
+
+# === 新增：系统校准参数 ===
+CALIBRATION_MODE = False      # 是否启用校准模式
+CALIBRATION_DISTANCE = 1.0    # 校准时的已知距离（米）
+# 系统延迟补偿（通过校准确定）
+SYSTEM_DELAY_OFFSET = 0.566847    # 单位：秒，正值表示减小测量距离
+
+# 信号检测参数
+MIN_CORRELATION_THRESHOLD = 0.15
+ENERGY_THRESHOLD = 0.05
+SEARCH_WINDOW_START = 0.0
+SEARCH_WINDOW_END = 7.5
+
+# 调试选项
+DEBUG_MODE = True
+SAVE_AUDIO = True
+SHOW_PLOTS = False

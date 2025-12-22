@@ -11,97 +11,230 @@ app = Flask(__name__)
 CORS(app)
 
 # ============ 配置参数 ============
-SAMPLE_RATE = 44100
-CHIRP_DURATION = 0.1
-FREQ_START = 17000
-FREQ_END = 20000
+SAMPLE_RATE = 48000
+CHIRP_DURATION = 0.5
+RECORD_DURATION = 6.0  # 总录音时长
 SOUND_SPEED = 343
+DEVICE_OFFSET = 0.2  # 每台设备的麦克风-扬声器间距
+
+FREQ_A_START = 4000
+FREQ_A_END = 6000
+FREQ_B_START = 6000
+FREQ_B_END = 8000
 
 # ============ 全局变量 ============
 device_role = "anchor"
 peer_ip = ""
-last_distance = None
-recording = False
-audio_buffer = []
-my_delta_t = None
-measurement_lock = threading.Lock()  # 🆕 防止并发测量
+my_sample_diff = None
+measurement_lock = threading.Lock()
 
 # ============ 信号生成 ============
-def generate_chirp():
-    t = np.linspace(0, CHIRP_DURATION, int(SAMPLE_RATE * CHIRP_DURATION))
-    chirp = signal.chirp(t, f0=FREQ_START, f1=FREQ_END, t1=CHIRP_DURATION, method='linear')
-    return chirp * 0.5
+def generate_chirp_A():
+    """生成4-6kHz的chirp信号（模拟Matlab的chirp函数）"""
+    t = np.linspace(0, CHIRP_DURATION, int(SAMPLE_RATE * CHIRP_DURATION), endpoint=False)
+    chirp_signal = signal.chirp(t, f0=FREQ_A_START, f1=FREQ_A_END, 
+                                t1=CHIRP_DURATION, method='linear')
+    return chirp_signal * 0.5  # 适当的音量
 
-# ============ 信号检测 ============
-def detect_chirp(audio_data, template):
-    if len(audio_data) < len(template):
-        return None
+def generate_chirp_B():
+    """生成6-8kHz的chirp信号"""
+    t = np.linspace(0, CHIRP_DURATION, int(SAMPLE_RATE * CHIRP_DURATION), endpoint=False)
+    chirp_signal = signal.chirp(t, f0=FREQ_B_START, f1=FREQ_B_END, 
+                                t1=CHIRP_DURATION, method='linear')
+    return chirp_signal * 0.5
+
+# ============ 信号检测（完全按照Matlab逻辑） ============
+def detect_chirp_position(audio_data, template):
+    """
+    使用匹配滤波检测chirp信号位置
+    完全模拟Matlab的conv和max逻辑
+    """
+    # 翻转模板（Matlab: z1 = z1(end : -1 : 1)）
+    template_reversed = template[::-1]
     
-    correlation = signal.correlate(audio_data, template, mode='valid')
+    # 使用valid模式的卷积（Matlab: conv(recvData, z1, 'valid')）
+    correlation = np.correlate(audio_data, template_reversed, mode='valid')
+    
+    # 取绝对值（处理负值）
     correlation = np.abs(correlation)
     
-    threshold = np.max(correlation) * 0.6
-    peaks, _ = signal.find_peaks(correlation, height=threshold, distance=int(SAMPLE_RATE*0.05))
+    # 找到最大值位置
+    max_pos = np.argmax(correlation)
+    max_val = correlation[max_pos]
     
-    if len(peaks) > 0:
-        return peaks[0] / SAMPLE_RATE
-    return None
-
-# ============ 音频录制回调 ============
-def audio_callback(indata, frames, time_info, status):
-    global audio_buffer
-    if recording:
-        audio_buffer.extend(indata[:, 0].tolist())
-
-# ============ 核心测量函数 ============
-def measure_time_diff():
-    """
-    🆕 只负责测量本地的时间差，不做任何网络请求
-    """
-    global recording, audio_buffer, my_delta_t
+    # 计算信噪比
+    mean_val = np.mean(correlation)
+    snr = max_val / (mean_val + 1e-10)
     
-    template = generate_chirp()
-    audio_buffer = []
-    recording = True
+    print(f"   检测到峰值: 位置={max_pos}, 强度={max_val:.0f}, SNR={snr:.1f}dB")
+    
+    # 阈值检查（信噪比至少大于5）
+    if snr < 5:
+        print(f"⚠️ 信号太弱: SNR={snr:.1f} < 5")
+        return None
+    
+    return max_pos
+
+# ============ Anchor设备测量流程（方式1修复） ============
+def measure_as_anchor():
+    """Anchor设备测量流程"""
+    global my_sample_diff
+    
+    print("\n" + "="*60)
+    print("🔵 Anchor设备开始测量")
+    print("="*60)
+    
+    # 准备信号和模板
+    chirp_A = generate_chirp_A()
+    chirp_B = generate_chirp_B()
+    template_A = chirp_A[::-1]
+    template_B = chirp_B[::-1]
     
     print("🎤 开始录音...")
-    stream = sd.InputStream(
+    
+    # ✅ 修复：使用 blocking=False，然后手动等待
+    recording = sd.rec(
+        int(RECORD_DURATION * SAMPLE_RATE),
         samplerate=SAMPLE_RATE,
         channels=1,
-        callback=audio_callback
+        dtype='float32',
+        blocking=False  # 非阻塞
     )
-    stream.start()
     
-    time.sleep(0.1)
+    # 等待录音启动
+    time.sleep(0.05)
     
-    print("📢 发送Chirp信号...")
-    sd.play(template, SAMPLE_RATE)
-    sd.wait()
+    # 发送chirp A
+    print("📢 发送Chirp A (4-6kHz)...")
+    sd.play(chirp_A, SAMPLE_RATE)
+    sd.wait()  # 等待播放完成
     
-    print("⏱️  等待接收对方信号...")
-    time.sleep(2)
+    # ✅ 等待录音完成 - 用 sleep 代替 sd.wait(recording)
+    remaining_time = RECORD_DURATION - 0.05 - CHIRP_DURATION
+    if remaining_time > 0:
+        time.sleep(remaining_time)
     
-    recording = False
-    stream.stop()
-    stream.close()
+    # 停止录音
+    sd.stop()
     
-    # 分析录音
-    audio_data = np.array(audio_buffer)
+    # 获取录音数据
+    audio_data = recording.flatten()
     
-    t1 = detect_chirp(audio_data[:int(SAMPLE_RATE*0.5)], template)
-    t3 = detect_chirp(audio_data[int(SAMPLE_RATE*0.5):], template)
+    print(f"✅ 录音完成: {len(audio_data)} 采样点 ({len(audio_data)/SAMPLE_RATE:.2f}s)")
+    print(f"   音频能量: {np.mean(np.abs(audio_data)):.6f}")
     
-    if t1 is None or t3 is None:
-        print(f"❌ 信号检测失败: t1={t1}, t3={t3}")
+    # 检测两个chirp的位置
+    print("\n🔍 检测Chirp A位置...")
+    pos_A = detect_chirp_position(audio_data, template_A)
+    
+    print("🔍 检测Chirp B位置...")
+    pos_B = detect_chirp_position(audio_data, template_B)
+    
+    if pos_A is None or pos_B is None:
+        print("❌ 信号检测失败")
         return None, None, None
     
-    t3 = t3 + 0.5
-    delta_t = t3 - t1
-    my_delta_t = delta_t
+    sample_diff = pos_B - pos_A
+    my_sample_diff = sample_diff
     
-    print(f"✅ 测量完成: Δt={delta_t:.4f}s, t1={t1:.4f}s, t3={t3:.4f}s")
+    print(f"\n📊 Anchor测量结果:")
+    print(f"   Chirp A位置: {pos_A} 采样点 ({pos_A/SAMPLE_RATE:.4f}s)")
+    print(f"   Chirp B位置: {pos_B} 采样点 ({pos_B/SAMPLE_RATE:.4f}s)")
+    print(f"   采样点差值: {sample_diff}")
+    print("="*60 + "\n")
     
-    return delta_t, t1, t3
+    return sample_diff, pos_A, pos_B
+
+# ============ Target设备测量流程（方式1修复） ============
+def measure_as_target():
+    """Target设备测量流程"""
+    global my_sample_diff
+    
+    print("\n" + "="*60)
+    print("🟢 Target设备开始测量")
+    print("="*60)
+    
+    # 准备信号和模板
+    chirp_A = generate_chirp_A()
+    chirp_B = generate_chirp_B()
+    template_A = chirp_A[::-1]
+    template_B = chirp_B[::-1]
+    
+    print("🎤 开始录音...")
+    
+    # ✅ 修复：使用 blocking=False
+    recording = sd.rec(
+        int(RECORD_DURATION * SAMPLE_RATE),
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype='float32',
+        blocking=False
+    )
+    
+    # 等待1.5秒
+    print("⏱️  等待接收Anchor的信号...")
+    time.sleep(1.5)
+    
+    # 发送chirp B
+    print("📢 发送Chirp B (6-8kHz)...")
+    sd.play(chirp_B, SAMPLE_RATE)
+    sd.wait()
+    
+    # ✅ 等待录音完成
+    remaining_time = RECORD_DURATION - 1.5 - CHIRP_DURATION
+    if remaining_time > 0:
+        time.sleep(remaining_time)
+    
+    # 停止录音
+    sd.stop()
+    
+    # 获取录音数据
+    audio_data = recording.flatten()
+    
+    print(f"✅ 录音完成: {len(audio_data)} 采样点 ({len(audio_data)/SAMPLE_RATE:.2f}s)")
+    print(f"   音频能量: {np.mean(np.abs(audio_data)):.6f}")
+    
+    # 检测两个chirp的位置
+    print("\n🔍 检测Chirp A位置...")
+    pos_A = detect_chirp_position(audio_data, template_A)
+    
+    print("🔍 检测Chirp B位置...")
+    pos_B = detect_chirp_position(audio_data, template_B)
+    
+    if pos_A is None or pos_B is None:
+        print("❌ 信号检测失败")
+        return None, None, None
+    
+    sample_diff = pos_B - pos_A
+    my_sample_diff = sample_diff
+    
+    print(f"\n📊 Target测量结果:")
+    print(f"   Chirp A位置: {pos_A} 采样点 ({pos_A/SAMPLE_RATE:.4f}s)")
+    print(f"   Chirp B位置: {pos_B} 采样点 ({pos_B/SAMPLE_RATE:.4f}s)")
+    print(f"   采样点差值: {sample_diff}")
+    print("="*60 + "\n")
+    
+    return sample_diff, pos_A, pos_B
+
+# ============ 计算距离（完全按照Matlab公式） ============
+def calculate_distance(sample_diff_A, sample_diff_B):
+    """
+    根据BeepBeep公式计算距离
+    Matlab: distance = 343/2 * (p2-p1-psub) + dAA + dBB
+    """
+    time_diff_A = sample_diff_A / SAMPLE_RATE  # p2_A - p1_A
+    time_diff_B = sample_diff_B / SAMPLE_RATE  # p2_B - p1_B (psub)
+    
+    # BeepBeep公式
+    distance = (SOUND_SPEED / 2) * (time_diff_A - time_diff_B) + 2 * DEVICE_OFFSET
+    
+    print(f"\n🧮 距离计算:")
+    print(f"   时间差A (Anchor): {time_diff_A:.6f}s")
+    print(f"   时间差B (Target): {time_diff_B:.6f}s")
+    print(f"   时间差之差: {time_diff_A - time_diff_B:.6f}s")
+    print(f"   计算距离: {distance:.3f}m")
+    
+    return abs(distance)
 
 # ============ Web路由 ============
 @app.route('/')
@@ -114,75 +247,71 @@ def set_config():
     data = request.json
     device_role = data.get('role', 'anchor')
     peer_ip = data.get('peer_ip', '')
-    print(f"✅ 配置更新: 角色={device_role}, 对方IP={peer_ip}")
+    print(f"\n✅ 配置更新: 角色={device_role}, 对方IP={peer_ip}\n")
     return jsonify({"status": "ok", "role": device_role, "peer_ip": peer_ip})
 
 @app.route('/start_ranging', methods=['POST'])
 def start_ranging():
-    """
-    🆕 新流程：
-    1. 立即测量本地时间差
-    2. 等待3秒（让对方也完成测量）
-    3. 请求对方的时间差
-    4. 计算距离
-    """
-    global my_delta_t
+    """主测距流程"""
+    global my_sample_diff
     
     with measurement_lock:
-        print("=" * 60)
-        print("🎯 开始测距流程...")
+        my_sample_diff = None
         
-        # 步骤1：测量本地时间差
-        delta_t_A, t1, t3 = measure_time_diff()
+        # 执行本地测量
+        if device_role == "anchor":
+            sample_diff, pos_A, pos_B = measure_as_anchor()
+        else:
+            sample_diff, pos_A, pos_B = measure_as_target()
         
-        if delta_t_A is None:
-            return jsonify({"error": "本地信号检测失败"})
+        if sample_diff is None:
+            return jsonify({"error": "本地信号检测失败，请检查音量和环境噪声"})
         
-        # 步骤2：等待对方完成测量
+        # 等待对方完成测量
         print("⏳ 等待3秒让对方完成测量...")
         time.sleep(3)
         
-        # 步骤3：请求对方的时间差
         if not peer_ip:
             return jsonify({
-                "delta_t_A": round(delta_t_A, 4),
-                "t1": round(t1, 4),
-                "t3": round(t3, 4),
-                "error": "未配置对方IP"
+                "sample_diff": int(sample_diff),
+                "pos_A": int(pos_A) if pos_A else 0,
+                "pos_B": int(pos_B) if pos_B else 0,
+                "error": "未配置对方IP，无法计算距离"
             })
         
+        # 获取对方的测量结果
         try:
-            print(f"📡 请求对方时间差: {peer_ip}:5000")
+            print(f"📡 请求对方测量结果...")
             response = requests.get(
-                f"http://{peer_ip}:5000/get_my_delta",  # 🆕 改为GET请求
+                f"http://{peer_ip}:5001/get_sample_diff",
                 timeout=5
             )
             data = response.json()
-            delta_t_B = data.get("delta_t", None)
+            peer_sample_diff = data.get("sample_diff")
             
-            if delta_t_B is None:
+            if peer_sample_diff is None:
                 return jsonify({
-                    "delta_t_A": round(delta_t_A, 4),
-                    "t1": round(t1, 4),
-                    "t3": round(t3, 4),
+                    "sample_diff": int(sample_diff),
                     "error": "对方尚未完成测量"
                 })
             
-            # 步骤4：计算距离
-            distance = (SOUND_SPEED / 2) * abs(delta_t_A - delta_t_B)
+            # 计算距离（注意参数顺序）
+            if device_role == "anchor":
+                distance = calculate_distance(sample_diff, peer_sample_diff)
+            else:
+                distance = calculate_distance(peer_sample_diff, sample_diff)
             
-            print(f"📏 计算结果:")
-            print(f"   Δt_A = {delta_t_A:.4f}s")
-            print(f"   Δt_B = {delta_t_B:.4f}s")
-            print(f"   距离 = {distance:.3f}m")
-            print("=" * 60)
+            print(f"\n🎯 最终结果: {distance:.3f}m")
+            print("="*60 + "\n")
             
             return jsonify({
                 "distance": round(distance, 3),
-                "delta_t_A": round(delta_t_A, 4),
-                "delta_t_B": round(delta_t_B, 4),
-                "t1": round(t1, 4),
-                "t3": round(t3, 4)
+                "sample_diff_local": int(sample_diff),
+                "sample_diff_peer": int(peer_sample_diff),
+                "pos_A": int(pos_A) if pos_A else 0,
+                "pos_B": int(pos_B) if pos_B else 0,
+                "time_A": round(pos_A/SAMPLE_RATE, 4) if pos_A else 0,
+                "time_B": round(pos_B/SAMPLE_RATE, 4) if pos_B else 0
             })
             
         except requests.Timeout:
@@ -190,28 +319,44 @@ def start_ranging():
         except Exception as e:
             return jsonify({"error": f"网络错误: {str(e)}"})
 
-@app.route('/get_my_delta', methods=['GET'])  # 🆕 改为GET，简化逻辑
-def get_my_delta():
-    """返回本地已测量的时间差"""
-    global my_delta_t
+@app.route('/get_sample_diff', methods=['GET'])
+def get_sample_diff():
+    """返回本地测量的采样点差值"""
+    global my_sample_diff
+    print(f"📨 收到查询请求，本地采样点差 = {my_sample_diff}")
     
-    print(f"📨 收到查询请求，本地Δt = {my_delta_t}")
-    
-    if my_delta_t is not None:
-        return jsonify({"delta_t": my_delta_t})
+    if my_sample_diff is not None:
+        return jsonify({"sample_diff": int(my_sample_diff)})
     else:
         return jsonify({"error": "本地尚未完成测量"}), 400
 
 @app.route('/test_signal', methods=['POST'])
 def test_signal():
-    chirp = generate_chirp()
+    """测试信号发送"""
+    data = request.json
+    signal_type = data.get('type', 'A')
+    
+    if signal_type == 'A':
+        chirp = generate_chirp_A()
+        print("🔊 发送测试信号 A (4-6kHz)")
+    else:
+        chirp = generate_chirp_B()
+        print("🔊 发送测试信号 B (6-8kHz)")
+    
     sd.play(chirp, SAMPLE_RATE)
     sd.wait()
-    return jsonify({"status": "Signal sent"})
+    
+    return jsonify({"status": "ok", "type": signal_type})
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("🚀 声波测距系统启动")
-    print("📡 监听地址: http://0.0.0.0:5000")
-    print("=" * 60)
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, use_reloader=False)
+    print("\n" + "="*60)
+    print("🚀 声波测距系统启动 (BeepBeep算法)")
+    print("📡 监听地址: http://0.0.0.0:5001")
+    print("="*60)
+    print("\n⚠️  使用前请确保:")
+    print("   1. 两台设备在同一局域网")
+    print("   2. 音量调至50-70%")
+    print("   3. Anchor先点击'开始测距'，Target随后点击")
+    print("   4. 环境尽量安静\n")
+    print("="*60 + "\n")
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)

@@ -13,7 +13,7 @@ CORS(app)
 # ============ 配置参数 ============
 SAMPLE_RATE = 48000
 CHIRP_DURATION = 0.5
-RECORD_DURATION = 3.0  # 总录音时长
+RECORD_DURATION = 6.0  # 总录音时长
 SOUND_SPEED = 343
 DEVICE_OFFSET = 0.2  # 每台设备的麦克风-扬声器间距
 

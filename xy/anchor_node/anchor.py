@@ -21,7 +21,7 @@ class AnchorNodeCLI:
         self.running = True
 
     def log(self, msg):
-        timestamp = time.strftime("%H:%M:%S.%f")[:-3]
+        timestamp = time.strftime("%H:%M:%S")[:-3]
         print(f"[{timestamp}] [锚节点] {msg}")
 
     def start_server(self):

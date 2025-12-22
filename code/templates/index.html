@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>声波测距系统</title>
+    <title>声波测距系统 (BeepBeep)</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -13,7 +13,7 @@
             padding: 20px;
         }
         .container {
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
             background: white;
             border-radius: 20px;
@@ -23,12 +23,18 @@
         h1 {
             text-align: center;
             color: #667eea;
-            margin-bottom: 30px;
+            margin-bottom: 10px;
             font-size: 2.5em;
+        }
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 30px;
+            font-size: 1.1em;
         }
         .config-section {
             background: #f8f9fa;
-            padding: 20px;
+            padding: 25px;
             border-radius: 10px;
             margin-bottom: 30px;
         }
@@ -53,15 +59,23 @@
             outline: none;
             border-color: #667eea;
         }
+        .role-info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
         .button-group {
-            display: flex;
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
             gap: 15px;
             margin-bottom: 30px;
         }
         button {
-            flex: 1;
-            padding: 15px 30px;
-            font-size: 18px;
+            padding: 15px 20px;
+            font-size: 16px;
             font-weight: 600;
             border: none;
             border-radius: 10px;
@@ -81,6 +95,12 @@
         }
         .btn-secondary:hover {
             background: #5a6268;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-success:hover {
+            background: #218838;
         }
         .result-box {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -102,7 +122,7 @@
         }
         .details {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 15px;
             margin-top: 20px;
         }
@@ -112,17 +132,17 @@
             border-radius: 10px;
         }
         .detail-label {
-            font-size: 0.9em;
+            font-size: 0.85em;
             opacity: 0.8;
             margin-bottom: 5px;
         }
         .detail-value {
-            font-size: 1.5em;
+            font-size: 1.3em;
             font-weight: bold;
         }
         .status {
             text-align: center;
-            padding: 10px;
+            padding: 15px;
             border-radius: 8px;
             margin-bottom: 20px;
             font-weight: 600;
@@ -139,47 +159,60 @@
             border: 4px solid #f3f3f3;
             border-top: 4px solid #667eea;
             border-radius: 50%;
-            width: 40px;
-            height: 40px;
+            width: 50px;
+            height: 50px;
             animation: spin 1s linear infinite;
-            margin: 0 auto;
+            margin: 0 auto 15px;
         }
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
+        }
+        .loading-text {
+            font-size: 1.1em;
+            color: #667eea;
+            font-weight: 600;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🔊 声波测距系统</h1>
+        <div class="subtitle">基于 BeepBeep 算法</div>
         
         <div class="config-section">
             <h3 style="margin-bottom: 15px;">📡 设备配置</h3>
             <div class="form-group">
                 <label>设备角色：</label>
-                <select id="role">
-                    <option value="anchor">锚节点 (Anchor)</option>
-                    <option value="target">目标设备 (Target)</option>
+                <select id="role" onchange="updateRoleInfo()">
+                    <option value="anchor">🔵 Anchor (锚节点 - 先发送)</option>
+                    <option value="target">🟢 Target (目标设备 - 后发送)</option>
                 </select>
             </div>
             <div class="form-group">
                 <label>对方IP地址：</label>
                 <input type="text" id="peerIp" placeholder="例如: 192.168.1.100">
             </div>
-            <button class="btn-secondary" onclick="saveConfig()" style="width: 100%;">保存配置</button>
+            <div class="role-info" id="roleInfo">
+                <strong>🔵 Anchor模式:</strong><br>
+                • 立即发送 4-6kHz chirp信号<br>
+                • 接收对方的 6-8kHz chirp信号<br>
+                • 请确保另一台设备设置为Target模式
+            </div>
+            <button class="btn-success" onclick="saveConfig()" style="width: 100%; margin-top: 15px;">💾 保存配置</button>
         </div>
 
         <div id="status" class="status" style="display: none;"></div>
 
         <div class="button-group">
             <button class="btn-primary" onclick="startRanging()">🎯 开始测距</button>
-            <button class="btn-secondary" onclick="testSignal()">🔊 测试信号</button>
+            <button class="btn-secondary" onclick="testSignal('A')">🔊 测试信号A</button>
+            <button class="btn-secondary" onclick="testSignal('B')">🔊 测试信号B</button>
         </div>
 
         <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p style="margin-top: 10px;">正在测距中...</p>
+            <div class="loading-text">正在测距中，请保持安静...</div>
         </div>
 
         <div class="result-box" id="result" style="display: none;">
@@ -190,25 +223,50 @@
             </div>
             <div class="details">
                 <div class="detail-item">
-                    <div class="detail-label">设备A时间差</div>
-                    <div class="detail-value"><span id="deltaA">--</span> s</div>
+                    <div class="detail-label">本地采样点差</div>
+                    <div class="detail-value"><span id="sampleLocal">--</span></div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">设备B时间差</div>
-                    <div class="detail-value"><span id="deltaB">--</span> s</div>
+                    <div class="detail-label">对方采样点差</div>
+                    <div class="detail-value"><span id="samplePeer">--</span></div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">信号检测时间</div>
-                    <div class="detail-value"><span id="detectTime">--</span> s</div>
+                    <div class="detail-label">Chirp A时间</div>
+                    <div class="detail-value"><span id="timeA">--</span> s</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Chirp B时间</div>
+                    <div class="detail-value"><span id="timeB">--</span> s</div>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
+        function updateRoleInfo() {
+            const role = document.getElementById('role').value;
+            const roleInfo = document.getElementById('roleInfo');
+            
+            if (role === 'anchor') {
+                roleInfo.innerHTML = `
+                    <strong>🔵 Anchor模式:</strong><br>
+                    • 立即发送 4-6kHz chirp信号<br>
+                    • 接收对方的 6-8kHz chirp信号<br>
+                    • 请确保另一台设备设置为Target模式
+                `;
+            } else {
+                roleInfo.innerHTML = `
+                    <strong>🟢 Target模式:</strong><br>
+                    • 等待1.5秒后发送 6-8kHz chirp信号<br>
+                    • 接收对方的 4-6kHz chirp信号<br>
+                    • 请确保另一台设备设置为Anchor模式
+                `;
+            }
+        }
+
         function showStatus(message, type) {
             const status = document.getElementById('status');
-            status.textContent = message;
+            status.innerHTML = message;
             status.className = 'status ' + type;
             status.style.display = 'block';
             setTimeout(() => status.style.display = 'none', 5000);
@@ -225,11 +283,17 @@
             })
             .then(res => res.json())
             .then(data => {
-                showStatus('✅ 配置已保存！', 'success');
+                showStatus('✅ 配置已保存！请在另一台设备上点击"开始测距"', 'success');
             });
         }
 
         function startRanging() {
+            const peerIp = document.getElementById('peerIp').value;
+            if (!peerIp) {
+                showStatus('❌ 请先配置对方IP地址！', 'error');
+                return;
+            }
+            
             document.getElementById('loading').style.display = 'block';
             document.getElementById('result').style.display = 'none';
             
@@ -245,11 +309,12 @@
                 
                 document.getElementById('result').style.display = 'block';
                 document.getElementById('distance').textContent = data.distance || '--';
-                document.getElementById('deltaA').textContent = data.delta_t_A || '--';
-                document.getElementById('deltaB').textContent = data.delta_t_B || '--';
-                document.getElementById('detectTime').textContent = data.t1 || '--';
+                document.getElementById('sampleLocal').textContent = data.sample_diff_local || '--';
+                document.getElementById('samplePeer').textContent = data.sample_diff_peer || '--';
+                document.getElementById('timeA').textContent = data.time_A || '--';
+                document.getElementById('timeB').textContent = data.time_B || '--';
                 
-                showStatus('✅ 测距完成！', 'success');
+                showStatus('✅ 测距完成！距离: ' + data.distance + ' 米', 'success');
             })
             .catch(err => {
                 document.getElementById('loading').style.display = 'none';
@@ -257,13 +322,20 @@
             });
         }
 
-        function testSignal() {
-            fetch('/test_signal', {method: 'POST'})
+        function testSignal(type) {
+            fetch('/test_signal', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({type: type})
+            })
             .then(res => res.json())
             .then(data => {
-                showStatus('🔊 测试信号已发送！', 'info');
+                showStatus(`🔊 测试信号${type}已发送！`, 'info');
             });
         }
+
+        // 页面加载时更新角色信息
+        updateRoleInfo();
     </script>
 </body>
 </html>

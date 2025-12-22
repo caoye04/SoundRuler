@@ -32,7 +32,6 @@ measurement_lock = threading.Lock()
 def generate_chirp_A():
     """生成4-6kHz的chirp信号（模拟Matlab的chirp函数）"""
     t = np.linspace(0, CHIRP_DURATION, int(SAMPLE_RATE * CHIRP_DURATION), endpoint=False)
-    # 使用Matlab相同的chirp生成方式
     chirp_signal = signal.chirp(t, f0=FREQ_A_START, f1=FREQ_A_END, 
                                 t1=CHIRP_DURATION, method='linear')
     return chirp_signal * 0.5  # 适当的音量
@@ -50,7 +49,7 @@ def detect_chirp_position(audio_data, template):
     使用匹配滤波检测chirp信号位置
     完全模拟Matlab的conv和max逻辑
     """
-    # 🔴 关键：翻转模板（Matlab: z1 = z1(end : -1 : 1)）
+    # 翻转模板（Matlab: z1 = z1(end : -1 : 1)）
     template_reversed = template[::-1]
     
     # 使用valid模式的卷积（Matlab: conv(recvData, z1, 'valid')）
@@ -76,12 +75,9 @@ def detect_chirp_position(audio_data, template):
     
     return max_pos
 
-# ============ Anchor设备测量流程（完全按照Matlab逻辑） ============
+# ============ Anchor设备测量流程（方式1修复） ============
 def measure_as_anchor():
-    """
-    Anchor设备测量流程
-    对应Matlab代码的Server端
-    """
+    """Anchor设备测量流程"""
     global my_sample_diff
     
     print("\n" + "="*60)
@@ -91,21 +87,21 @@ def measure_as_anchor():
     # 准备信号和模板
     chirp_A = generate_chirp_A()
     chirp_B = generate_chirp_B()
-    template_A = chirp_A[::-1]  # 翻转后的模板
+    template_A = chirp_A[::-1]
     template_B = chirp_B[::-1]
     
-    # 🔴 关键：同步录音，而非回调
     print("🎤 开始录音...")
     
-    # 创建录音对象
+    # ✅ 修复：使用 blocking=False，然后手动等待
     recording = sd.rec(
         int(RECORD_DURATION * SAMPLE_RATE),
         samplerate=SAMPLE_RATE,
         channels=1,
-        dtype='float32'
+        dtype='float32',
+        blocking=False  # 非阻塞
     )
     
-    # 等待录音启动（很重要！）
+    # 等待录音启动
     time.sleep(0.05)
     
     # 发送chirp A
@@ -113,8 +109,15 @@ def measure_as_anchor():
     sd.play(chirp_A, SAMPLE_RATE)
     sd.wait()  # 等待播放完成
     
-    # 等待录音完成
-    sd.wait(recording)
+    # ✅ 等待录音完成 - 用 sleep 代替 sd.wait(recording)
+    remaining_time = RECORD_DURATION - 0.05 - CHIRP_DURATION
+    if remaining_time > 0:
+        time.sleep(remaining_time)
+    
+    # 停止录音
+    sd.stop()
+    
+    # 获取录音数据
     audio_data = recording.flatten()
     
     print(f"✅ 录音完成: {len(audio_data)} 采样点 ({len(audio_data)/SAMPLE_RATE:.2f}s)")
@@ -142,12 +145,9 @@ def measure_as_anchor():
     
     return sample_diff, pos_A, pos_B
 
-# ============ Target设备测量流程（完全按照Matlab逻辑） ============
+# ============ Target设备测量流程（方式1修复） ============
 def measure_as_target():
-    """
-    Target设备测量流程
-    对应Matlab代码的Client端
-    """
+    """Target设备测量流程"""
     global my_sample_diff
     
     print("\n" + "="*60)
@@ -162,15 +162,16 @@ def measure_as_target():
     
     print("🎤 开始录音...")
     
-    # 🔴 关键：同步录音
+    # ✅ 修复：使用 blocking=False
     recording = sd.rec(
         int(RECORD_DURATION * SAMPLE_RATE),
         samplerate=SAMPLE_RATE,
         channels=1,
-        dtype='float32'
+        dtype='float32',
+        blocking=False
     )
     
-    # 🔴 等待1.5秒（对应Matlab的pause(T*3)）
+    # 等待1.5秒
     print("⏱️  等待接收Anchor的信号...")
     time.sleep(1.5)
     
@@ -179,8 +180,15 @@ def measure_as_target():
     sd.play(chirp_B, SAMPLE_RATE)
     sd.wait()
     
-    # 等待录音完成
-    sd.wait(recording)
+    # ✅ 等待录音完成
+    remaining_time = RECORD_DURATION - 1.5 - CHIRP_DURATION
+    if remaining_time > 0:
+        time.sleep(remaining_time)
+    
+    # 停止录音
+    sd.stop()
+    
+    # 获取录音数据
     audio_data = recording.flatten()
     
     print(f"✅ 录音完成: {len(audio_data)} 采样点 ({len(audio_data)/SAMPLE_RATE:.2f}s)")
@@ -213,7 +221,6 @@ def calculate_distance(sample_diff_A, sample_diff_B):
     """
     根据BeepBeep公式计算距离
     Matlab: distance = 343/2 * (p2-p1-psub) + dAA + dBB
-    其中 psub = p2_B - p1_B
     """
     time_diff_A = sample_diff_A / SAMPLE_RATE  # p2_A - p1_A
     time_diff_B = sample_diff_B / SAMPLE_RATE  # p2_B - p1_B (psub)
@@ -260,7 +267,7 @@ def start_ranging():
         if sample_diff is None:
             return jsonify({"error": "本地信号检测失败，请检查音量和环境噪声"})
         
-        # 🔴 等待对方完成测量（重要！）
+        # 等待对方完成测量
         print("⏳ 等待3秒让对方完成测量...")
         time.sleep(3)
         
@@ -288,7 +295,7 @@ def start_ranging():
                     "error": "对方尚未完成测量"
                 })
             
-            # 🔴 计算距离（注意参数顺序）
+            # 计算距离（注意参数顺序）
             if device_role == "anchor":
                 distance = calculate_distance(sample_diff, peer_sample_diff)
             else:
@@ -345,9 +352,11 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("🚀 声波测距系统启动 (BeepBeep算法)")
     print("📡 监听地址: http://0.0.0.0:5001")
-    print("⚠️  请确保:")
+    print("="*60)
+    print("\n⚠️  使用前请确保:")
     print("   1. 两台设备在同一局域网")
     print("   2. 音量调至50-70%")
     print("   3. Anchor先点击'开始测距'，Target随后点击")
+    print("   4. 环境尽量安静\n")
     print("="*60 + "\n")
     app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)

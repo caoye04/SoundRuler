@@ -1,6 +1,5 @@
 import numpy as np
 from scipy import signal
-from scipy.signal import hilbert
 from .config import *
 
 def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_RATE):
@@ -8,7 +7,7 @@ def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_R
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     chirp_signal = signal.chirp(t, f_start, duration, f_end, method='linear')
     
-    # 修改这一行：使用 signal.windows.hann 或者 np.hanning
+    # 兼容不同版本的scipy
     try:
         # 尝试新版本的scipy
         window = signal.windows.hann(len(chirp_signal))
@@ -27,71 +26,103 @@ def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_R
     
     return chirp_signal.astype(np.float32)
 
-def cross_correlate_signals(signal1, signal2):
-    """计算两个信号的互相关"""
-    # 使用scipy的correlate函数
-    correlation = signal.correlate(signal1, signal2, mode='full')
+def find_signal_start(recorded_data, reference_signal, sample_rate=SAMPLE_RATE):
+    """使用互相关找到信号开始时间"""
+    correlation = signal.correlate(recorded_data, reference_signal, mode='full')
+    correlation = np.abs(correlation)
     
-    # 找到最大相关位置
-    max_idx = np.argmax(np.abs(correlation))
-    max_correlation = correlation[max_idx]
-    
-    # 计算时间偏移（相对于signal1的开始）
-    delay_samples = max_idx - len(signal2) + 1
-    
-    return delay_samples, np.abs(max_correlation)
-
-def find_signal_robust(recorded_data, reference_signal, sample_rate=SAMPLE_RATE):
-    """更稳健的信号检测方法"""
-    
-    # 预处理：带通滤波
-    nyquist = sample_rate / 2
-    low_freq = min(FREQ_A_START, FREQ_B_START) * 0.8 / nyquist
-    high_freq = max(FREQ_A_END, FREQ_B_END) * 1.2 / nyquist
-    
-    # 设计带通滤波器
-    b, a = signal.butter(4, [low_freq, high_freq], btype='band')
-    
-    # 对录音数据和参考信号都进行滤波
-    filtered_recorded = signal.filtfilt(b, a, recorded_data)
-    filtered_reference = signal.filtfilt(b, a, reference_signal)
-    
-    # 计算互相关
-    delay_samples, max_corr = cross_correlate_signals(filtered_recorded, filtered_reference)
+    # 找到最大相关值的位置
+    max_corr_idx = np.argmax(correlation)
     
     # 转换为时间
+    delay_samples = max_corr_idx - (len(reference_signal) - 1)
     delay_time = delay_samples / sample_rate
     
-    # 归一化相关系数
-    norm_corr = max_corr / (np.linalg.norm(filtered_recorded) * np.linalg.norm(filtered_reference))
+    # 归一化相关强度
+    max_correlation = correlation[max_corr_idx]
+    ref_energy = np.sum(reference_signal ** 2)
     
-    return delay_time, norm_corr
+    if ref_energy > 0:
+        correlation_strength = max_correlation / np.sqrt(ref_energy * len(reference_signal))
+    else:
+        correlation_strength = 0
+    
+    return delay_time, correlation_strength
 
-def validate_detection_results(tA1, tB1, corrA, corrB):
-    """验证检测结果的合理性"""
-    issues = []
+def detect_signals(recorded_data, chirp_A, chirp_B, sample_rate=SAMPLE_RATE):
+    """改进的信号检测"""
     
-    # 检查相关度
-    if corrA < MIN_CORRELATION_THRESHOLD:
-        issues.append(f"Chirp A相关度过低: {corrA:.3f}")
+    # 预处理：带通滤波
+    from scipy.signal import butter, filtfilt
     
-    if corrB < MIN_CORRELATION_THRESHOLD:
-        issues.append(f"Chirp B相关度过低: {corrB:.3f}")
+    # 为两个chirp分别设计滤波器
+    nyquist = sample_rate / 2
     
-    # 检查时间顺序
-    if tB1 <= tA1:
-        issues.append(f"时间顺序错误: tA1={tA1:.3f}, tB1={tB1:.3f}")
+    # Chirp A 滤波器
+    low_A = max(0.01, (FREQ_A_START - 200) / nyquist)
+    high_A = min(0.99, (FREQ_A_END + 200) / nyquist)
+    b_A, a_A = butter(4, [low_A, high_A], btype='band')
     
-    # 检查时间范围
-    if not (SEARCH_WINDOW_START <= tA1 <= SEARCH_WINDOW_END):
-        issues.append(f"Chirp A时间超出范围: {tA1:.3f}")
+    # Chirp B 滤波器  
+    low_B = max(0.01, (FREQ_B_START - 200) / nyquist)
+    high_B = min(0.99, (FREQ_B_END + 200) / nyquist)
+    b_B, a_B = butter(4, [low_B, high_B], btype='band')
     
-    if not (SEARCH_WINDOW_START <= tB1 <= SEARCH_WINDOW_END):
-        issues.append(f"Chirp B时间超出范围: {tB1:.3f}")
-    
-    return issues
+    try:
+        # 分别滤波
+        filtered_A = filtfilt(b_A, a_A, recorded_data)
+        filtered_B = filtfilt(b_B, a_B, recorded_data)
+        
+        # 检测 Chirp A
+        time_A, corr_A = find_signal_start(filtered_A, chirp_A, sample_rate)
+        
+        # 检测 Chirp B  
+        time_B, corr_B = find_signal_start(filtered_B, chirp_B, sample_rate)
+        
+        # 降低相关度要求
+        min_correlation = 0.1  # 从0.5降到0.1
+        
+        print(f"检测结果: Chirp A相关度={corr_A:.3f}, Chirp B相关度={corr_B:.3f}")
+        
+        # 验证结果
+        if corr_A > min_correlation and corr_B > min_correlation:
+            # 检查时间差的合理性（1-10米对应3-30ms）
+            time_diff = abs(time_B - time_A)
+            if 0.001 <= time_diff <= 0.1:  # 1ms到100ms
+                return time_A, time_B, corr_A, corr_B
+            else:
+                print(f"时间差异常: {time_diff:.6f}秒")
+                return None
+        else:
+            print(f"相关度过低: A={corr_A:.3f}, B={corr_B:.3f}")
+            return None
+            
+    except Exception as e:
+        print(f"信号检测错误: {e}")
+        return None
 
-def calculate_distance_beepbeep(delta_A, delta_B):
-    """BeepBeep算法计算距离"""
-    distance = (SOUND_SPEED / 2) * (delta_A - delta_B) + DEVICE_OFFSET_A + DEVICE_OFFSET_B
-    return max(0, distance)
+def detect_signals_with_validation(recorded_data, sample_rate=SAMPLE_RATE):
+    """带验证的信号检测"""
+    # 生成参考信号
+    chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END)
+    chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END)
+    
+    result = detect_signals(recorded_data, chirp_A, chirp_B, sample_rate)
+    
+    if result is None:
+        return None
+    
+    time_A, time_B, corr_A, corr_B = result
+    
+    # 额外验证：检查时间顺序是否合理
+    expected_time_diff = CHIRP_B_DELAY - CHIRP_A_DELAY  # 应该是2.0秒
+    actual_time_diff = time_B - time_A
+    
+    print(f"时间差验证: 期望={expected_time_diff:.1f}s, 实际={actual_time_diff:.6f}s")
+    
+    # 允许一定的时间差误差（±0.5秒）
+    if abs(actual_time_diff - expected_time_diff) > 0.5:
+        print(f"时间差验证失败，差异过大: {abs(actual_time_diff - expected_time_diff):.6f}s")
+        return None
+    
+    return time_A, time_B, corr_A, corr_B

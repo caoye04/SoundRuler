@@ -105,7 +105,7 @@ def measure_as_anchor():
     sd.wait()
     
     # 等待录音完成
-    sd.wait(recorded_audio)
+    sd.wait()
     print("✅ 录音完成")
     
     audio_data = recorded_audio.flatten()
@@ -169,7 +169,7 @@ def measure_as_target():
     sd.wait()
     
     # 等待录音完成
-    sd.wait(recorded_audio)
+    sd.wait()
     print("✅ 录音完成")
     
     audio_data = recorded_audio.flatten()
@@ -259,9 +259,9 @@ def start_ranging():
             })
         
         try:
-            print(f"📡 请求对方测量结果: http://{peer_ip}:5000/get_sample_diff")
+            print(f"📡 请求对方测量结果: http://{peer_ip}:5001/get_sample_diff")
             response = requests.get(
-                f"http://{peer_ip}:5000/get_sample_diff",
+                f"http://{peer_ip}:5001/get_sample_diff",
                 timeout=5
             )
             data = response.json()
@@ -333,6 +333,6 @@ def test_signal():
 if __name__ == '__main__':
     print("\n" + "="*60)
     print("🚀 声波测距系统启动 (BeepBeep算法)")
-    print("📡 监听地址: http://0.0.0.0:5000")
+    print("📡 监听地址: http://0.0.0.0:5001")
     print("="*60 + "\n")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)

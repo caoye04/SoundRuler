@@ -26,11 +26,11 @@ SOUND_SPEED = 343.0    # 声速 m/s
 DEVICE_OFFSET_A = 0.0  # 先设为0，后续校准
 DEVICE_OFFSET_B = 0.0
 
-# 信号检测参数 - 优化
+# 信号检测参数 - 优化（关键修复：调整搜索窗口）
 MIN_CORRELATION_THRESHOLD = 0.15  # 降低阈值，更容易通过
 ENERGY_THRESHOLD = 0.05           # 能量阈值
-SEARCH_WINDOW_START = 0.0
-SEARCH_WINDOW_END = 7.0
+SEARCH_WINDOW_START = 0.0         # 从录音开始搜索
+SEARCH_WINDOW_END = 7.5           # 搜索到7.5秒
 
 # 调试选项
 DEBUG_MODE = True          # 开启调试模式

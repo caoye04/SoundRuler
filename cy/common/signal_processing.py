@@ -49,72 +49,95 @@ def bandpass_filter(data, lowcut, highcut, sample_rate=SAMPLE_RATE, order=6):
         return data
 
 def find_signal_with_energy(recorded_data, reference_signal, sample_rate=SAMPLE_RATE):
-    """使用能量检测+互相关的混合方法"""
+    """使用互相关检测信号起始时间 - 修复版"""
     
     # 1. 确定搜索频率范围
-    if np.mean(reference_signal[:100]) == np.mean(reference_signal[-100:]):
-        # 判断是chirp A还是chirp B
-        freq_content = np.fft.fft(reference_signal)
-        freq_axis = np.fft.fftfreq(len(reference_signal), 1/sample_rate)
-        dominant_freq = abs(freq_axis[np.argmax(np.abs(freq_content))])
-        
-        if dominant_freq < 4000:
-            lowcut, highcut = FREQ_A_START * 0.8, FREQ_A_END * 1.2
-        else:
-            lowcut, highcut = FREQ_B_START * 0.8, FREQ_B_END * 1.2
+    # 通过FFT分析参考信号的主要频率成分
+    freq_content = np.fft.fft(reference_signal)
+    freq_axis = np.fft.fftfreq(len(reference_signal), 1/sample_rate)
+    dominant_freq = abs(freq_axis[np.argmax(np.abs(freq_content[:len(freq_content)//2]))])
+    
+    if dominant_freq < 3500:
+        lowcut, highcut = FREQ_A_START * 0.7, FREQ_A_END * 1.3
+        signal_name = "Chirp A"
     else:
-        lowcut = min(FREQ_A_START, FREQ_B_START) * 0.8
-        highcut = max(FREQ_A_END, FREQ_B_END) * 1.2
+        lowcut, highcut = FREQ_B_START * 0.7, FREQ_B_END * 1.3
+        signal_name = "Chirp B"
+    
+    if DEBUG_MODE:
+        print(f"  [调试] 检测{signal_name}, 主频={dominant_freq:.0f}Hz, 滤波范围={lowcut:.0f}-{highcut:.0f}Hz")
     
     # 2. 带通滤波
     filtered_recorded = bandpass_filter(recorded_data, lowcut, highcut)
     filtered_reference = bandpass_filter(reference_signal, lowcut, highcut)
     
-    # 3. 计算归一化互相关
-    # 使用'same'模式，保持与输入信号相同的长度
-    correlation = signal.correlate(filtered_recorded, filtered_reference, mode='same')
+    # 3. 使用'valid'模式计算互相关（关键修复！）
+    # valid模式：输出长度 = len(recorded) - len(reference) + 1
+    correlation = signal.correlate(filtered_recorded, filtered_reference, mode='valid')
     
-    # 归一化
+    # 4. 归一化互相关
     ref_energy = np.sqrt(np.sum(filtered_reference ** 2))
     
-    # 计算局部能量进行归一化
+    # 计算滑动窗口的局部能量
     window_size = len(filtered_reference)
-    local_energy = np.sqrt(
-        signal.convolve(filtered_recorded ** 2, np.ones(window_size), mode='same')
+    # 使用卷积计算局部能量
+    local_energy_squared = signal.convolve(
+        filtered_recorded[:len(correlation) + window_size - 1] ** 2, 
+        np.ones(window_size), 
+        mode='valid'
     )
+    local_energy = np.sqrt(local_energy_squared)
     
     # 避免除以零
     local_energy = np.maximum(local_energy, 1e-10)
     
-    # 归一化互相关
+    # 归一化
     normalized_corr = correlation / (local_energy * ref_energy + 1e-10)
     
-    # 4. 找到最大相关位置
-    search_start = int(SEARCH_WINDOW_START * sample_rate)
-    search_end = int(SEARCH_WINDOW_END * sample_rate)
-    search_end = min(search_end, len(normalized_corr))
+    # 5. 在搜索窗口内找最大值
+    search_start_time = SEARCH_WINDOW_START
+    search_end_time = SEARCH_WINDOW_END
     
-    search_region = normalized_corr[search_start:search_end]
+    # 转换为样本索引（相对于correlation数组）
+    search_start_idx = max(0, int(search_start_time * sample_rate))
+    search_end_idx = min(len(normalized_corr), int(search_end_time * sample_rate))
+    
+    if search_end_idx <= search_start_idx:
+        if DEBUG_MODE:
+            print(f"  [调试] 警告: 搜索范围无效")
+        return 0.0, 0.0
+    
+    # 在搜索范围内找最大值
+    search_region = normalized_corr[search_start_idx:search_end_idx]
     
     if len(search_region) == 0:
         return 0.0, 0.0
     
     max_idx_in_region = np.argmax(np.abs(search_region))
-    max_idx = search_start + max_idx_in_region
-    
+    max_idx = search_start_idx + max_idx_in_region
     max_correlation = normalized_corr[max_idx]
     
-    # 5. 使用抛物线插值提高精度
+    # 6. 抛物线插值提高精度
     if 1 <= max_idx < len(normalized_corr) - 1:
-        # 三点抛物线插值
-        y1, y2, y3 = abs(normalized_corr[max_idx-1]), abs(normalized_corr[max_idx]), abs(normalized_corr[max_idx+1])
+        y1 = abs(normalized_corr[max_idx-1])
+        y2 = abs(normalized_corr[max_idx])
+        y3 = abs(normalized_corr[max_idx+1])
         
-        if y1 > 0 and y3 > 0:
+        if y1 > 0 and y3 > 0 and (y1 - 2*y2 + y3) != 0:
             delta = 0.5 * (y1 - y3) / (y1 - 2*y2 + y3)
-            max_idx = max_idx + delta
+            # 限制插值范围，避免偏移过大
+            delta = np.clip(delta, -0.5, 0.5)
+            max_idx_refined = max_idx + delta
+        else:
+            max_idx_refined = max_idx
+    else:
+        max_idx_refined = max_idx
     
-    # 转换为时间
-    delay_time = (max_idx - len(recorded_data) / 2) / sample_rate
+    # 7. 转换为时间（关键：valid模式下，索引0对应录音的第0个样本）
+    delay_time = max_idx_refined / sample_rate
+    
+    if DEBUG_MODE:
+        print(f"  [调试] 最大相关位置: 索引={max_idx_refined:.1f}, 时间={delay_time:.3f}s, 相关度={abs(max_correlation):.3f}")
     
     return delay_time, abs(max_correlation)
 
@@ -166,7 +189,11 @@ def save_debug_audio(audio_data, filename, sample_rate=SAMPLE_RATE):
         filepath = os.path.join("debug_audio", filename)
         
         # 归一化到16位整数
-        audio_int = np.int16(audio_data / np.max(np.abs(audio_data)) * 32767)
+        max_val = np.max(np.abs(audio_data))
+        if max_val > 0:
+            audio_int = np.int16(audio_data / max_val * 32767 * 0.95)
+        else:
+            audio_int = np.int16(audio_data)
         
         with wave.open(filepath, 'w') as wf:
             wf.setnchannels(1)

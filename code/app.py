@@ -11,22 +11,21 @@ app = Flask(__name__)
 CORS(app)
 
 # ============ 配置参数 ============
-SAMPLE_RATE = 48000  # 改为48kHz，与MATLAB一致
-CHIRP_DURATION = 0.5  # 改为0.5秒
-RECORD_DURATION = 3.0  # 录音时长
-SOUND_SPEED = 343  # 声速 m/s
-DEVICE_OFFSET = 0.2  # 设备自身麦克风与扬声器间距（米）
+SAMPLE_RATE = 48000
+CHIRP_DURATION = 0.5
+RECORD_DURATION = 3.0
+SOUND_SPEED = 343
+DEVICE_OFFSET = 0.2
 
-# 两个不同的chirp信号
 FREQ_A_START = 4000
 FREQ_A_END = 6000
 FREQ_B_START = 6000
 FREQ_B_END = 8000
 
 # ============ 全局变量 ============
-device_role = "anchor"  # anchor 或 target
+device_role = "anchor"
 peer_ip = ""
-my_sample_diff = None  # 存储本地测量的采样点差值
+my_sample_diff = None
 measurement_lock = threading.Lock()
 
 # ============ 信号生成 ============
@@ -35,7 +34,7 @@ def generate_chirp_A():
     t = np.linspace(0, CHIRP_DURATION, int(SAMPLE_RATE * CHIRP_DURATION))
     chirp = signal.chirp(t, f0=FREQ_A_START, f1=FREQ_A_END, 
                          t1=CHIRP_DURATION, method='linear')
-    return chirp * 0.3  # 降低音量避免失真
+    return chirp * 0.3
 
 def generate_chirp_B():
     """生成6-8kHz的chirp信号"""
@@ -50,6 +49,11 @@ def detect_chirp_position(audio_data, chirp_template):
     使用匹配滤波检测chirp信号位置
     返回：采样点位置（不是时间）
     """
+    # 🆕 添加调试信息
+    print(f"   音频数据长度: {len(audio_data)} 采样点")
+    print(f"   模板长度: {len(chirp_template)} 采样点")
+    print(f"   音频能量: {np.mean(np.abs(audio_data)):.6f}")
+    
     # 翻转模板用于匹配滤波
     template_reversed = chirp_template[::-1]
     
@@ -57,27 +61,31 @@ def detect_chirp_position(audio_data, chirp_template):
     correlation = signal.correlate(audio_data, template_reversed, mode='valid')
     correlation = np.abs(correlation)
     
+    # 🆕 添加调试信息
+    print(f"   相关性最大值: {np.max(correlation):.2f}")
+    print(f"   相关性平均值: {np.mean(correlation):.2f}")
+    
     # 找到最大值位置
     max_pos = np.argmax(correlation)
     max_val = correlation[max_pos]
     
-    # 检查信号强度
-    threshold = np.max(correlation) * 0.5
+    # ✅ 修改阈值逻辑：使用平均值的倍数
+    mean_val = np.mean(correlation)
+    threshold = mean_val * 3  # 峰值至少是平均值的3倍
+    
     if max_val < threshold:
         print(f"⚠️ 信号强度不足: {max_val:.2f} < {threshold:.2f}")
         return None
     
-    print(f"✅ 检测到信号: 位置={max_pos}, 强度={max_val:.2f}")
+    # ✅ 添加信噪比检查
+    snr = max_val / (mean_val + 1e-10)
+    print(f"✅ 检测到信号: 位置={max_pos}, 强度={max_val:.2f}, 信噪比={snr:.1f}")
+    
     return max_pos
 
 # ============ Anchor设备测量流程 ============
 def measure_as_anchor():
-    """
-    Anchor设备：
-    1. 先发送chirp A
-    2. 接收target的chirp B
-    3. 计算两个信号的时间差
-    """
+    """Anchor设备测量流程"""
     global my_sample_diff
     
     print("\n" + "="*60)
@@ -88,40 +96,59 @@ def measure_as_anchor():
     template_A = chirp_A
     template_B = generate_chirp_B()
     
+    # ✅ 使用列表收集录音数据
+    recorded_chunks = []
+    
+    def callback(indata, frames, time_info, status):
+        if status:
+            print(f"⚠️ 录音状态: {status}")
+        recorded_chunks.append(indata.copy())
+    
     # 开始录音
     print("🎤 开始录音...")
-    recorded_audio = sd.rec(
-        int(RECORD_DURATION * SAMPLE_RATE),
+    stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
+        callback=callback,
         dtype='float32'
     )
+    stream.start()
     
     time.sleep(0.1)  # 等待录音启动
     
-    # 立即发送chirp A
+    # 发送chirp A
     print("📢 发送Chirp A (4-6kHz)...")
     sd.play(chirp_A, SAMPLE_RATE)
     sd.wait()
     
-    # 等待录音完成
-    sd.wait()
+    # 继续录音
+    time.sleep(RECORD_DURATION - 0.1 - CHIRP_DURATION)
+    
+    stream.stop()
+    stream.close()
     print("✅ 录音完成")
     
-    audio_data = recorded_audio.flatten()
+    # ✅ 合并录音数据
+    audio_data = np.concatenate(recorded_chunks, axis=0).flatten()
+    
+    # 🆕 添加音频数据检查
+    print(f"\n🔍 录音数据检查:")
+    print(f"   总样本数: {len(audio_data)}")
+    print(f"   数据范围: [{audio_data.min():.4f}, {audio_data.max():.4f}]")
+    print(f"   平均能量: {np.mean(np.abs(audio_data)):.6f}")
+    print(f"   是否有声音: {'是' if np.max(np.abs(audio_data)) > 0.01 else '否'}\n")
     
     # 检测两个chirp的位置
-    print("\n🔍 检测Chirp A位置...")
+    print("🔍 检测Chirp A位置...")
     pos_A = detect_chirp_position(audio_data, template_A)
     
-    print("🔍 检测Chirp B位置...")
+    print("\n🔍 检测Chirp B位置...")
     pos_B = detect_chirp_position(audio_data, template_B)
     
     if pos_A is None or pos_B is None:
         print("❌ 信号检测失败")
         return None, None, None
     
-    # 计算采样点差值
     sample_diff = pos_B - pos_A
     my_sample_diff = sample_diff
     
@@ -135,12 +162,7 @@ def measure_as_anchor():
 
 # ============ Target设备测量流程 ============
 def measure_as_target():
-    """
-    Target设备：
-    1. 接收anchor的chirp A
-    2. 延迟1.5秒后发送chirp B
-    3. 计算两个信号的时间差
-    """
+    """Target设备测量流程"""
     global my_sample_diff
     
     print("\n" + "="*60)
@@ -151,16 +173,25 @@ def measure_as_target():
     template_A = generate_chirp_A()
     template_B = chirp_B
     
+    # ✅ 使用列表收集录音数据
+    recorded_chunks = []
+    
+    def callback(indata, frames, time_info, status):
+        if status:
+            print(f"⚠️ 录音状态: {status}")
+        recorded_chunks.append(indata.copy())
+    
     # 开始录音
     print("🎤 开始录音...")
-    recorded_audio = sd.rec(
-        int(RECORD_DURATION * SAMPLE_RATE),
+    stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
+        callback=callback,
         dtype='float32'
     )
+    stream.start()
     
-    # 等待1.5秒后发送chirp B（让anchor先发送）
+    # 等待1.5秒后发送chirp B
     print("⏱️  等待1.5秒...")
     time.sleep(1.5)
     
@@ -168,24 +199,34 @@ def measure_as_target():
     sd.play(chirp_B, SAMPLE_RATE)
     sd.wait()
     
-    # 等待录音完成
-    sd.wait()
+    # 继续录音
+    time.sleep(RECORD_DURATION - 1.5 - CHIRP_DURATION)
+    
+    stream.stop()
+    stream.close()
     print("✅ 录音完成")
     
-    audio_data = recorded_audio.flatten()
+    # ✅ 合并录音数据
+    audio_data = np.concatenate(recorded_chunks, axis=0).flatten()
+    
+    # 🆕 添加音频数据检查
+    print(f"\n🔍 录音数据检查:")
+    print(f"   总样本数: {len(audio_data)}")
+    print(f"   数据范围: [{audio_data.min():.4f}, {audio_data.max():.4f}]")
+    print(f"   平均能量: {np.mean(np.abs(audio_data)):.6f}")
+    print(f"   是否有声音: {'是' if np.max(np.abs(audio_data)) > 0.01 else '否'}\n")
     
     # 检测两个chirp的位置
-    print("\n🔍 检测Chirp A位置...")
+    print("🔍 检测Chirp A位置...")
     pos_A = detect_chirp_position(audio_data, template_A)
     
-    print("🔍 检测Chirp B位置...")
+    print("\n🔍 检测Chirp B位置...")
     pos_B = detect_chirp_position(audio_data, template_B)
     
     if pos_A is None or pos_B is None:
         print("❌ 信号检测失败")
         return None, None, None
     
-    # 计算采样点差值
     sample_diff = pos_B - pos_A
     my_sample_diff = sample_diff
     
@@ -199,17 +240,10 @@ def measure_as_target():
 
 # ============ 计算距离 ============
 def calculate_distance(sample_diff_A, sample_diff_B):
-    """
-    根据BeepBeep公式计算距离
-    distance = (c/2) * (Δt_A - Δt_B) + d_AA + d_BB
-    """
-    # 将采样点差值转换为时间
+    """根据BeepBeep公式计算距离"""
     time_diff_A = sample_diff_A / SAMPLE_RATE
     time_diff_B = sample_diff_B / SAMPLE_RATE
-    
-    # 计算距离
     distance = (SOUND_SPEED / 2) * (time_diff_A - time_diff_B) + 2 * DEVICE_OFFSET
-    
     return abs(distance)
 
 # ============ Web路由 ============
@@ -234,9 +268,8 @@ def start_ranging():
     global my_sample_diff
     
     with measurement_lock:
-        my_sample_diff = None  # 重置
+        my_sample_diff = None
         
-        # 根据角色执行不同的测量流程
         if device_role == "anchor":
             sample_diff, pos_A, pos_B = measure_as_anchor()
         else:
@@ -245,11 +278,9 @@ def start_ranging():
         if sample_diff is None:
             return jsonify({"error": "本地信号检测失败"})
         
-        # 等待对方完成测量
         print("⏳ 等待2秒让对方完成测量...")
         time.sleep(2)
         
-        # 请求对方的测量结果
         if not peer_ip:
             return jsonify({
                 "sample_diff": int(sample_diff),
@@ -273,7 +304,6 @@ def start_ranging():
                     "error": "对方尚未完成测量"
                 })
             
-            # 计算距离
             if device_role == "anchor":
                 distance = calculate_distance(sample_diff, peer_sample_diff)
             else:
@@ -304,7 +334,6 @@ def start_ranging():
 def get_sample_diff():
     """返回本地测量的采样点差值"""
     global my_sample_diff
-    
     print(f"📨 收到查询请求，本地采样点差 = {my_sample_diff}")
     
     if my_sample_diff is not None:

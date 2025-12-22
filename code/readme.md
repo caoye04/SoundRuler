@@ -5,7 +5,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # 3. 安装依赖（现在可以用pip了）
-pip install flask numpy scipy sounddevice flask-cors
+pip install flask numpy scipy sounddevice flask-cors requests
 
 # 4. 验证安装
 pip list

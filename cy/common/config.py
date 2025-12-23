@@ -30,7 +30,7 @@ DEVICE_OFFSET_B = 0.0
 CALIBRATION_MODE = False      # 是否启用校准模式
 CALIBRATION_DISTANCE = 1.0    # 校准时的已知距离（米）
 # 系统延迟补偿（通过校准确定）
-SYSTEM_DELAY_OFFSET = 0.566847    # 单位：秒，正值表示减小测量距离
+SYSTEM_DELAY_OFFSET = 0    # 单位：秒，正值表示减小测量距离
 
 # 信号检测参数
 MIN_CORRELATION_THRESHOLD = 0.15

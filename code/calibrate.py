@@ -11,7 +11,7 @@ import os
 # 添加common目录到路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'common'))
 
-from config import CALIBRATION_DISTANCE, SOUND_SPEED
+from common.config import CALIBRATION_DISTANCE, SOUND_SPEED
 
 def main():
     print("=" * 60)

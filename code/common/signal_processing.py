@@ -6,27 +6,39 @@ import matplotlib.pyplot as plt
 import os
 
 def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_RATE):
-    """生成增强的线性调频信号（Chirp）"""
+    """生成改进的线性调频信号（Chirp）"""
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     
     # 生成chirp
     chirp_signal = signal.chirp(t, f_start, duration, f_end, method='linear')
     
-    # 使用更平滑的窗函数（汉宁窗）
+    # 🔥 改进 1: 使用 Tukey 窗（边缘更陡峭，减少频谱泄露）
     try:
-        window = signal.windows.hann(len(chirp_signal))
+        window = signal.windows.tukey(len(chirp_signal), alpha=0.2)
     except AttributeError:
         try:
-            window = signal.hann(len(chirp_signal))
+            window = signal.tukey(len(chirp_signal), alpha=0.2)
         except AttributeError:
-            window = np.hanning(len(chirp_signal))
+            # 回退到汉宁窗
+            window = signal.hann(len(chirp_signal))
     
     chirp_signal = chirp_signal * window
     
-    # 归一化到接近最大幅度（提高信号强度）
-    chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.95
+    # 🔥 改进 2: 归一化到 0.9（避免削波）
+    chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.9
     
-    return chirp_signal.astype(np.float32)
+    # 🔥 改进 3: 添加尾部静音（50ms）减少混响干扰
+    silence_duration = 0.05  # 50 毫秒
+    silence_samples = int(sample_rate * silence_duration)
+    silence = np.zeros(silence_samples, dtype=np.float32)
+    
+    chirp_with_silence = np.concatenate([chirp_signal, silence])
+    
+    if DEBUG_MODE:
+        print(f"  [信号生成] 频率: {f_start}-{f_end}Hz, 长度: {len(chirp_with_silence)/sample_rate:.3f}s")
+    
+    return chirp_with_silence.astype(np.float32)
+
 
 def bandpass_filter(data, lowcut, highcut, sample_rate=SAMPLE_RATE, order=6):
     """带通滤波器"""

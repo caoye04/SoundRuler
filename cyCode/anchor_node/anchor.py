@@ -75,20 +75,25 @@ class AnchorNodeCLI:
         self.log("发送同步信号...")
         self.client_socket.sendall(b"SYNC_PREPARE\n")
         
-        response = self.client_socket.recv(1024).decode().strip()
-        if response != "READY":
-            self.log(f"同步失败，收到: {response}")
+        try:
+            self.client_socket.settimeout(5.0)
+            response = self.client_socket.recv(1024).decode().strip()
+            if response != "READY":
+                self.log(f"同步失败，收到: {response}")
+                return None
+        except socket.timeout:
+            self.log("等待目标设备响应超时")
             return None
 
         # 第二步：倒计时同步开始
         self.log("开始倒计时...")
         for i in range(3, 0, -1):
             self.client_socket.sendall(f"COUNTDOWN_{i}\n".encode())
-            time.sleep(1.0)  # 精确1秒间隔
+            time.sleep(1.0)
         
         # 第三步：同时开始
         self.client_socket.sendall(b"START_NOW\n")
-        time.sleep(0.1)  # 短暂延迟确保消息送达
+        time.sleep(0.1)
         
         # 准备录音
         record_frames = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
@@ -131,7 +136,7 @@ class AnchorNodeCLI:
                 except IOError as e:
                     self.log(f"录音缓冲区溢出: {e}")
                     continue
-                    
+                        
         except Exception as e:
             self.log(f"录音错误: {e}")
             return None
@@ -159,10 +164,14 @@ class AnchorNodeCLI:
         
         # 信号检测
         self.log("检测 Chirp A...")
-        tA1, corrA = find_signal_with_energy(recorded_data, chirp_A)
+        tA1, corrA = find_signal_with_energy(recorded_data, chirp_A, 
+                                            expected_delay=0.5,  # 期望0.5秒左右
+                                            signal_name="Chirp A")
         
         self.log("检测 Chirp B...")
-        tA3, corrB = find_signal_with_energy(recorded_data, chirp_B)
+        tA3, corrB = find_signal_with_energy(recorded_data, chirp_B,
+                                            expected_delay=tA1 + CHIRP_B_DELAY,  # 基于A的位置
+                                            signal_name="Chirp B")
         
         # 验证检测结果
         issues = validate_detection_results(tA1, tA3, corrA, corrB)
@@ -171,11 +180,14 @@ class AnchorNodeCLI:
             for issue in issues:
                 self.log(f"  - {issue}")
             
-            # 即使失败也显示检测结果
             self.log(f"  检测到的值: tA1={tA1:.3f}s, tA3={tA3:.3f}s")
             self.log(f"  相关度: corrA={corrA:.3f}, corrB={corrB:.3f}")
             
-            return None
+            # ===== 新增：即使验证失败，如果相关度可接受，也尝试继续 =====
+            if corrA >= MIN_CORRELATION_THRESHOLD and corrB >= MIN_CORRELATION_THRESHOLD * 0.5:
+                self.log("⚠ 尝试使用当前检测结果继续...")
+            else:
+                return None
         
         delta_A = tA3 - tA1
         
@@ -185,14 +197,21 @@ class AnchorNodeCLI:
 
         # 接收目标设备结果
         try:
-            self.client_socket.settimeout(5.0)
+            self.client_socket.settimeout(10.0)  # 增加超时时间
             result_data = self.client_socket.recv(1024).decode().strip()
             
+            # ===== 修复：更robust的数据解析 =====
             if result_data.startswith("ERROR"):
                 self.log(f"目标设备检测失败: {result_data}")
                 return None
+            
+            # 尝试解析浮点数
+            try:
+                delta_B = float(result_data)
+            except ValueError:
+                self.log(f"❌ 无法解析目标设备数据: {result_data}")
+                return None
                 
-            delta_B = float(result_data)
             self.log(f"✓ 目标设备时间差 Δt_B = {delta_B:.6f} 秒")
 
             # 计算距离
@@ -200,7 +219,7 @@ class AnchorNodeCLI:
             self.log(f"📏 测距结果：{distance:.3f} 米")
             
             return distance
-            
+                
         except socket.timeout:
             self.log("❌ 等待目标设备响应超时")
             return None

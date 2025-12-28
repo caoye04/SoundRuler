@@ -152,29 +152,9 @@ def parabolic_interpolation(y1, y2, y3):
 def find_signal_with_energy(recorded_data, reference_signal, 
                            expected_delay=None, signal_name="Signal",
                            sample_rate=SAMPLE_RATE):
-    """使用互相关检测信号起始时间 - 完全优化版
-    
-    改进点：
-    1. 动态搜索窗口（基于expected_delay）
-    2. 更强的8阶SOS滤波
-    3. 改进的归一化方法（逐点计算Pearson系数）
-    4. 自适应阈值
-    5. 更准确的抛物线插值
-    
-    Args:
-        recorded_data: 录音数据
-        reference_signal: 参考信号（chirp）
-        expected_delay: 期望的信号到达时间（秒），用于缩小搜索范围
-        signal_name: 信号名称（用于调试输出）
-        sample_rate: 采样率
-    
-    Returns:
-        delay_time: 检测到的时间（秒）
-        max_correlation: 最大相关度
-    """
+    """使用互相关检测信号起始时间 - 完全优化版"""
     
     # ===== 1. 确定搜索频率范围 =====
-    # 通过FFT分析参考信号的主要频率成分
     freq_content = np.fft.fft(reference_signal)
     freq_axis = np.fft.fftfreq(len(reference_signal), 1/sample_rate)
     dominant_freq = abs(freq_axis[np.argmax(np.abs(freq_content[:len(freq_content)//2]))])
@@ -184,12 +164,15 @@ def find_signal_with_energy(recorded_data, reference_signal,
         # Chirp A: 2000-4000 Hz
         lowcut = FREQ_A_START * 0.8   # 1600 Hz
         highcut = FREQ_A_END * 1.2     # 4800 Hz
-        default_search_end = 1.5        # ChirpA应该在前1.5秒内
+        default_search_start = 0.0
+        default_search_end = 2.0        # ChirpA应该在前2秒内
     else:
         # Chirp B: 4500-6500 Hz
         lowcut = FREQ_B_START * 0.8   # 3600 Hz
         highcut = FREQ_B_END * 1.2     # 7800 Hz
-        default_search_end = 6.5        # ChirpB在4秒延迟后，最多6.5秒内
+        # ===== 关键修改：Chirp B应该在4秒延迟后出现 =====
+        default_search_start = 3.5      # 从3.5秒开始搜索
+        default_search_end = 6.5        # 到6.5秒结束
     
     if DEBUG_MODE:
         print(f"  [{signal_name}] 主频={dominant_freq:.0f}Hz, 滤波={lowcut:.0f}-{highcut:.0f}Hz")
@@ -198,38 +181,40 @@ def find_signal_with_energy(recorded_data, reference_signal,
     filtered_recorded = bandpass_filter(recorded_data, lowcut, highcut, sample_rate, order=8)
     filtered_reference = bandpass_filter(reference_signal, lowcut, highcut, sample_rate, order=8)
     
-    # ===== 3. 计算互相关（valid模式） =====
+    # ===== 3. 使用能量检测预处理 =====
+    # 计算滑动窗口能量，帮助定位信号大致位置
+    window_size = len(filtered_reference)
+    energy = np.convolve(filtered_recorded**2, np.ones(window_size), mode='valid')
+    energy = energy / np.max(energy)  # 归一化
+    
+    # ===== 4. 计算互相关（valid模式） =====
     correlation = signal.correlate(filtered_recorded, filtered_reference, mode='valid')
     
-    # ===== 4. 归一化互相关（改进：逐点计算） =====
+    # ===== 5. 归一化互相关（改进：考虑能量） =====
     ref_energy = np.sqrt(np.sum(filtered_reference ** 2))
-    window_size = len(filtered_reference)
-    
-    # 初始化归一化相关数组
     normalized_corr = np.zeros(len(correlation))
     
-    # 逐点计算归一化（更精确但较慢）
-    # 对于实时性要求，可以用滑动窗口能量优化
     for i in range(len(correlation)):
         window_end = i + window_size
         if window_end <= len(filtered_recorded):
             window_data = filtered_recorded[i:window_end]
             window_energy = np.sqrt(np.sum(window_data ** 2))
             
-            # Pearson相关系数
             if window_energy > 1e-10 and ref_energy > 1e-10:
+                # 结合能量加权
                 normalized_corr[i] = correlation[i] / (window_energy * ref_energy)
+                # 如果能量太低，降低相关度
+                if i < len(energy) and energy[i] < 0.1:
+                    normalized_corr[i] *= energy[i] * 10
             else:
                 normalized_corr[i] = 0.0
     
-    # ===== 5. 确定搜索窗口 =====
+    # ===== 6. 确定搜索窗口 =====
     if expected_delay is not None:
-        # 如果提供了期望时间，在其附近±1秒搜索
-        search_start_time = max(0.05, expected_delay - 1.0)
+        search_start_time = max(0.0, expected_delay - 1.0)
         search_end_time = min(TOTAL_RECORD_TIME - 0.1, expected_delay + 1.0)
     else:
-        # 否则使用默认范围
-        search_start_time = SEARCH_WINDOW_START
+        search_start_time = default_search_start
         search_end_time = min(default_search_end, SEARCH_WINDOW_END)
     
     search_start_idx = max(0, int(search_start_time * sample_rate))
@@ -240,12 +225,11 @@ def find_signal_with_energy(recorded_data, reference_signal,
             print(f"  [{signal_name}] 警告: 搜索范围无效")
         return 0.0, 0.0
     
-    # ===== 6. 自适应阈值 =====
-    adaptive_thresh = calculate_adaptive_threshold(normalized_corr, percentile=90)
-    
-    # ===== 7. 在搜索范围内找最大值 =====
+    # ===== 7. 自适应阈值 =====
     search_region = normalized_corr[search_start_idx:search_end_idx]
+    adaptive_thresh = calculate_adaptive_threshold(search_region, percentile=85)
     
+    # ===== 8. 在搜索范围内找最大值 =====
     if len(search_region) == 0:
         return 0.0, 0.0
     
@@ -253,7 +237,7 @@ def find_signal_with_energy(recorded_data, reference_signal,
     max_idx = search_start_idx + max_idx_in_region
     max_correlation = normalized_corr[max_idx]
     
-    # ===== 8. 抛物线插值提高精度 =====
+    # ===== 9. 抛物线插值提高精度 =====
     if 1 <= max_idx < len(normalized_corr) - 1:
         y1 = abs(normalized_corr[max_idx-1])
         y2 = abs(normalized_corr[max_idx])
@@ -264,7 +248,7 @@ def find_signal_with_energy(recorded_data, reference_signal,
     else:
         max_idx_refined = float(max_idx)
     
-    # ===== 9. 转换为时间 =====
+    # ===== 10. 转换为时间 =====
     delay_time = max_idx_refined / sample_rate
     
     if DEBUG_MODE:
@@ -275,47 +259,40 @@ def find_signal_with_energy(recorded_data, reference_signal,
 
 
 def validate_detection_results(tA1, tB1, corrA, corrB):
-    """验证检测结果的合理性
-    
-    Args:
-        tA1: Chirp A在锚节点/目标设备的检测时间
-        tB1: Chirp B在锚节点/目标设备的检测时间
-        corrA: Chirp A的相关度
-        corrB: Chirp B的相关度
-    
-    Returns:
-        issues: 问题列表（空列表表示验证通过）
-    """
+    """验证检测结果的合理性"""
     issues = []
     
-    # 1. 检查相关度
-    if corrA < MIN_CORRELATION_THRESHOLD:
-        issues.append(f"Chirp A相关度过低: {corrA:.3f} (阈值: {MIN_CORRELATION_THRESHOLD})")
+    # 1. 检查相关度（降低阈值）
+    min_corr_A = MIN_CORRELATION_THRESHOLD
+    min_corr_B = MIN_CORRELATION_THRESHOLD * 0.7  # Chirp B可能受干扰，阈值降低30%
     
-    if corrB < MIN_CORRELATION_THRESHOLD:
-        issues.append(f"Chirp B相关度过低: {corrB:.3f} (阈值: {MIN_CORRELATION_THRESHOLD})")
+    if corrA < min_corr_A:
+        issues.append(f"Chirp A相关度过低: {corrA:.3f} (阈值: {min_corr_A:.3f})")
     
-    # 2. 检查时间顺序（B应该在A之后）
+    if corrB < min_corr_B:
+        issues.append(f"Chirp B相关度过低: {corrB:.3f} (阈值: {min_corr_B:.3f})")
+    
+    # 2. 检查时间顺序
     if tB1 <= tA1:
         issues.append(f"时间顺序异常: tB1={tB1:.3f}应大于tA1={tA1:.3f}")
     
-    # 3. 检查时间间隔是否合理（应该接近CHIRP_B_DELAY）
+    # 3. 检查时间间隔是否合理（放宽容忍度）
     time_diff = tB1 - tA1
     expected_diff = CHIRP_B_DELAY
-    tolerance = 2.0  # 允许±2秒误差
+    tolerance = 2.5  # 放宽到±2.5秒
     
     if abs(time_diff - expected_diff) > tolerance:
         issues.append(f"时间间隔异常: {time_diff:.3f}秒 (期望约{expected_diff}±{tolerance}秒)")
     
-    # 4. 检查时间范围
-    if not (SEARCH_WINDOW_START <= tA1 <= SEARCH_WINDOW_END):
+    # 4. 检查时间范围（放宽）
+    if not (-0.5 <= tA1 <= SEARCH_WINDOW_END):
         issues.append(f"Chirp A时间超出范围: {tA1:.3f}秒")
     
-    if not (SEARCH_WINDOW_START <= tB1 <= SEARCH_WINDOW_END):
+    if not (3.0 <= tB1 <= SEARCH_WINDOW_END):  # Chirp B至少在3秒后
         issues.append(f"Chirp B时间超出范围: {tB1:.3f}秒")
     
-    # 5. 检查时间差的物理合理性（不能对应超远距离）
-    max_reasonable_distance = 10.0  # 假设最大合理距离10米
+    # 5. 检查时间差的物理合理性
+    max_reasonable_distance = 15.0  # 提高到15米
     max_time_diff = 2 * max_reasonable_distance / SOUND_SPEED
     
     if abs(time_diff - expected_diff) > max_time_diff:

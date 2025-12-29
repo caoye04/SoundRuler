@@ -21,9 +21,12 @@ TOTAL_RECORD_TIME = 3.0     # 录音3秒
 CHIRP_B_DELAY = 1.5         # 设备B延迟1.5秒发送
 
 # 物理参数
+# 物理参数
 SOUND_SPEED = 343.0
-DEVICE_OFFSET_A = 0.2  # 参考代码用的20cm
+DEVICE_OFFSET_A = 0.2
 DEVICE_OFFSET_B = 0.2
+
+SYSTEM_DISTANCE_OFFSET = -1.95
 
 # 调试选项
 DEBUG_MODE = True

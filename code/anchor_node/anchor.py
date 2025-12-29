@@ -143,6 +143,13 @@ class AnchorNode:
         
         self.log(f"✓ Chirp A: t={t_A1:.3f}s, 相关度={corr_A:.3f}")
         self.log(f"✓ Chirp B: t={t_A2:.3f}s, 相关度={corr_B:.3f}")
+
+        if not hasattr(self, '_visualized'):
+            from common.visualize import plot_signal_analysis, plot_correlation_analysis
+            self.log("生成信号分析图...")
+            plot_signal_analysis(recorded_data, chirp_A, chirp_B, SAMPLE_RATE)
+            plot_correlation_analysis(recorded_data, chirp_A, chirp_B, t_A1, t_A2, SAMPLE_RATE)
+            self._visualized = True
         
         # 接收设备B的时间差
         try:

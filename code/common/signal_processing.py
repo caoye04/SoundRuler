@@ -3,12 +3,15 @@ from scipy import signal
 from .config import *
 
 def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_RATE):
-    """生成线性调频信号（与参考代码一致）"""
+    """生成线性调频信号"""
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     chirp_signal = signal.chirp(t, f_start, duration, f_end, method='linear')
     
+    window = signal.windows.tukey(len(chirp_signal), alpha=0.1)
+    chirp_signal = chirp_signal * window
+    
     # 归一化
-    chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.9
+    chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.95  # 提高音量
     
     return chirp_signal.astype(np.float32)
 

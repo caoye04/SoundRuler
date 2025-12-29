@@ -162,7 +162,10 @@ class AnchorNodeCLI:
         tA1, corrA = find_signal_with_energy(recorded_data, chirp_A)
         
         self.log("检测 Chirp B...")
-        tA3, corrB = find_signal_with_energy(recorded_data, chirp_B)
+        expected_chirp_B_time = tA1 + CHIRP_B_DELAY
+        tA3, corrB = find_signal_with_energy(recorded_data, chirp_B, 
+                                            expected_time=expected_chirp_B_time, 
+                                            search_tolerance=1.0)
         
         # 验证检测结果
         issues = validate_detection_results(tA1, tA3, corrA, corrB)

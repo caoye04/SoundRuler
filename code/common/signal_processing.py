@@ -60,11 +60,19 @@ def bandpass_filter(data, lowcut, highcut, sample_rate=SAMPLE_RATE, order=6):
     except:
         return data
 
-def find_signal_with_energy(recorded_data, reference_signal, sample_rate=SAMPLE_RATE):
-    """使用互相关检测信号起始时间 - 修复版"""
+def find_signal_with_energy(recorded_data, reference_signal, sample_rate=SAMPLE_RATE, 
+                           expected_time=None, search_tolerance=1.0):
+    """使用互相关检测信号起始时间 - 改进版（支持约束搜索）
+    
+    Args:
+        recorded_data: 录音数据
+        reference_signal: 参考信号
+        sample_rate: 采样率
+        expected_time: 期望的检测时间（秒），如果提供则在其附近搜索
+        search_tolerance: 搜索容差（秒），在 expected_time ± tolerance 范围内搜索
+    """
     
     # 1. 确定搜索频率范围
-    # 通过FFT分析参考信号的主要频率成分
     freq_content = np.fft.fft(reference_signal)
     freq_axis = np.fft.fftfreq(len(reference_signal), 1/sample_rate)
     dominant_freq = abs(freq_axis[np.argmax(np.abs(freq_content[:len(freq_content)//2]))])
@@ -83,34 +91,36 @@ def find_signal_with_energy(recorded_data, reference_signal, sample_rate=SAMPLE_
     filtered_recorded = bandpass_filter(recorded_data, lowcut, highcut)
     filtered_reference = bandpass_filter(reference_signal, lowcut, highcut)
     
-    # 3. 使用'valid'模式计算互相关（关键修复！）
-    # valid模式：输出长度 = len(recorded) - len(reference) + 1
+    # 3. 使用'valid'模式计算互相关
     correlation = signal.correlate(filtered_recorded, filtered_reference, mode='valid')
     
     # 4. 归一化互相关
     ref_energy = np.sqrt(np.sum(filtered_reference ** 2))
-    
-    # 计算滑动窗口的局部能量
     window_size = len(filtered_reference)
-    # 使用卷积计算局部能量
     local_energy_squared = signal.convolve(
         filtered_recorded[:len(correlation) + window_size - 1] ** 2, 
         np.ones(window_size), 
         mode='valid'
     )
     local_energy = np.sqrt(local_energy_squared)
-    
-    # 避免除以零
     local_energy = np.maximum(local_energy, 1e-10)
-    
-    # 归一化
     normalized_corr = correlation / (local_energy * ref_energy + 1e-10)
     
-    # 5. 在搜索窗口内找最大值
-    search_start_time = SEARCH_WINDOW_START
-    search_end_time = SEARCH_WINDOW_END
+    # 5. 🔥 改进：动态确定搜索窗口
+    if expected_time is not None:
+        # 如果提供了期望时间，在其附近搜索
+        search_start_time = max(SEARCH_WINDOW_START, expected_time - search_tolerance)
+        search_end_time = min(SEARCH_WINDOW_END, expected_time + search_tolerance)
+        if DEBUG_MODE:
+            print(f"  [调试] 使用约束搜索窗口: [{search_start_time:.3f}, {search_end_time:.3f}]秒 (期望={expected_time:.3f}s)")
+    else:
+        # 使用默认搜索窗口
+        search_start_time = SEARCH_WINDOW_START
+        search_end_time = SEARCH_WINDOW_END
+        if DEBUG_MODE:
+            print(f"  [调试] 使用默认搜索窗口: [{search_start_time:.3f}, {search_end_time:.3f}]秒")
     
-    # 转换为样本索引（相对于correlation数组）
+    # 转换为样本索引
     search_start_idx = max(0, int(search_start_time * sample_rate))
     search_end_idx = min(len(normalized_corr), int(search_end_time * sample_rate))
     
@@ -137,7 +147,6 @@ def find_signal_with_energy(recorded_data, reference_signal, sample_rate=SAMPLE_
         
         if y1 > 0 and y3 > 0 and (y1 - 2*y2 + y3) != 0:
             delta = 0.5 * (y1 - y3) / (y1 - 2*y2 + y3)
-            # 限制插值范围，避免偏移过大
             delta = np.clip(delta, -0.5, 0.5)
             max_idx_refined = max_idx + delta
         else:
@@ -145,7 +154,7 @@ def find_signal_with_energy(recorded_data, reference_signal, sample_rate=SAMPLE_
     else:
         max_idx_refined = max_idx
     
-    # 7. 转换为时间（关键：valid模式下，索引0对应录音的第0个样本）
+    # 7. 转换为时间
     delay_time = max_idx_refined / sample_rate
     
     if DEBUG_MODE:

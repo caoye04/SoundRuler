@@ -25,6 +25,8 @@ class TargetDeviceCLI:
         self.output_device_index = None
         self.find_best_audio_devices()
 
+        self.learned_delay = None
+
     def log(self, msg):
         timestamp = time.strftime("%H:%M")
         print(f"[{timestamp}] [目标设备] {msg}")
@@ -140,10 +142,28 @@ class TargetDeviceCLI:
         tB1, corrA = find_signal_with_energy(recorded_data, chirp_A)
         
         self.log("检测 Chirp B...")
-        expected_chirp_B_time = tB1 + CHIRP_B_DELAY
-        tB3, corrB = find_signal_with_energy(recorded_data, chirp_B, 
-                                            expected_time=expected_chirp_B_time, 
-                                            search_tolerance=1.0)
+        # 🔥 改进：自适应学习延迟
+        if self.learned_delay is None:
+            # 第一次测量：使用宽松窗口
+            self.log("  [首次测量] 使用宽松搜索窗口学习系统延迟...")
+            expected_time = tB1 + CHIRP_B_DELAY
+            tB3, corrB = find_signal_with_energy(recorded_data, chirp_B, 
+                                                expected_time=expected_time, 
+                                                search_tolerance=1.0)
+            
+            if corrB > MIN_CORRELATION_THRESHOLD:
+                # 学习实际延迟
+                self.learned_delay = tB3 - tB1
+                self.log(f"  🎯 学习到实际系统延迟: {self.learned_delay:.3f}秒 (理论值: {CHIRP_B_DELAY}秒)")
+                self.log(f"  💡 后续测量将使用严格窗口 (±0.15秒)")
+            else:
+                self.log(f"  ⚠️ 首次检测相关度过低({corrB:.3f})，下次重试学习")
+        else:
+            # 后续测量：使用学习到的延迟和严格窗口
+            expected_time = tB1 + self.learned_delay
+            tB3, corrB = find_signal_with_energy(recorded_data, chirp_B, 
+                                                expected_time=expected_time, 
+                                                search_tolerance=0.15)
         
         # 验证检测结果
         issues = validate_detection_results(tB1, tB3, corrA, corrB)

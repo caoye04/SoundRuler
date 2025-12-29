@@ -140,7 +140,10 @@ class TargetDeviceCLI:
         tB1, corrA = find_signal_with_energy(recorded_data, chirp_A)
         
         self.log("检测 Chirp B...")
-        tB3, corrB = find_signal_with_energy(recorded_data, chirp_B)
+        expected_chirp_B_time = tB1 + CHIRP_B_DELAY
+        tB3, corrB = find_signal_with_energy(recorded_data, chirp_B, 
+                                            expected_time=expected_chirp_B_time, 
+                                            search_tolerance=1.0)
         
         # 验证检测结果
         issues = validate_detection_results(tB1, tB3, corrA, corrB)

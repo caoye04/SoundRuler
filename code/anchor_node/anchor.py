@@ -164,10 +164,9 @@ class AnchorNode:
             self.log(f"Δt_B = {delta_B:.6f}s")
             
             # 计算距离
-            raw_distance = (SOUND_SPEED / 2) * abs(delta_A - delta_B) + DEVICE_OFFSET_A + DEVICE_OFFSET_B
-            distance = raw_distance + SYSTEM_DISTANCE_OFFSET
-
-            self.log(f"📏 测距结果: {distance:.3f}m")
+            distance = (SOUND_SPEED / 2) * abs(delta_A - delta_B) + DEVICE_OFFSET_A + DEVICE_OFFSET_B
+            
+            self.log(f"📏 测距结果: {distance:.3f} 米")
             
             return distance
             

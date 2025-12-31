@@ -89,32 +89,22 @@ class AnchorNode:
         
         try:
             # 打开音频流
-            input_stream = self.audio.open(
-                format=pyaudio.paFloat32,
-                channels=1,
-                rate=SAMPLE_RATE,
-                input=True,
-                input_device_index=self.input_device_index,
-                frames_per_buffer=CHUNK_SIZE
-            )
-            
-            output_stream = self.audio.open(
-                format=pyaudio.paFloat32,
-                channels=1,
-                rate=SAMPLE_RATE,
-                output=True,
-                output_device_index=self.output_device_index,
-                frames_per_buffer=len(chirp_A)
-            )
+            input_stream = self.audio.open(...)
+            output_stream = self.audio.open(...)
 
-            # 🔥 关键：同时开始录音和播放
-            # 立即播放 Chirp A
-            output_stream.write(chirp_A.tobytes())
-            
-            # 持续录音
+            # ✅ 修复：在录音循环内部播放Chirp A
             frame_idx = 0
+            chirp_A_played = False
+            
             while frame_idx < record_frames:
                 chunk_size = min(CHUNK_SIZE, record_frames - frame_idx)
+                
+                # 在录音开始时立即播放 Chirp A
+                if not chirp_A_played:
+                    self.log("播放 Chirp A")
+                    output_stream.write(chirp_A.tobytes())
+                    chirp_A_played = True
+                
                 try:
                     audio_chunk = input_stream.read(chunk_size, exception_on_overflow=False)
                     chunk_data = np.frombuffer(audio_chunk, dtype=np.float32)

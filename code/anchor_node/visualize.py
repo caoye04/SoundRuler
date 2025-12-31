@@ -46,9 +46,13 @@ def visualize_anchor_audio(filepath, save_path=None):
     # ========== 检测Chirp位置 ==========
     print("正在检测Chirp信号位置...")
     
-    # 生成参考chirp信号
-    chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END)
-    chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END)
+    # Chirp A用线性（已经很好）
+    chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, 
+                            duration=0.5, amplitude=0.95, method='linear')
+
+    # Chirp B用对数（低频能量更多，传播更好）
+    chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, 
+                            duration=0.5, amplitude=0.98, method='logarithmic')
     
     # 检测chirp位置
     t_A, corr_A = find_chirp_position(audio, chirp_A, sample_rate)

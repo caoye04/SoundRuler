@@ -2,17 +2,24 @@ import numpy as np
 from scipy import signal
 from .config import *
 
-def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_RATE):
-    """生成线性调频信号"""
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    chirp_signal = signal.chirp(t, f_start, duration, f_end, method='linear')
+def generate_chirp(f_start, f_end, duration=0.5, sample_rate=SAMPLE_RATE, 
+                   amplitude=0.95, method='linear'):
+    """生成调频信号
     
-    # 改这里：使用汉宁窗
+    Args:
+        method: 'linear' 或 'logarithmic'
+    """
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    
+    # 支持不同调制方式
+    chirp_signal = signal.chirp(t, f_start, duration, f_end, method=method)
+    
     window = signal.windows.hann(len(chirp_signal))
     chirp_signal = chirp_signal * window
     
-    # 归一化
-    chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.95
+    max_val = np.max(np.abs(chirp_signal))
+    if max_val > 0:
+        chirp_signal = chirp_signal / max_val * amplitude
     
     return chirp_signal.astype(np.float32)
 

@@ -57,7 +57,7 @@ class TargetDevice:
 
         # Chirp B用对数（低频能量更多，传播更好）
         chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, 
-                                duration=0.5, amplitude=0.98, method='logarithmic')
+                                duration=0.5, amplitude=0.95, method='logarithmic')
 
         # 等待锚节点准备信号
         ready_msg = self.client_socket.recv(1024).decode().strip()

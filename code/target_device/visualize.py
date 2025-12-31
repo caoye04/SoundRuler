@@ -43,23 +43,24 @@ def visualize_target_audio(filepath, save_path=None):
     duration = len(audio) / sample_rate
     time_axis = np.linspace(0, duration, len(audio))
     
-    # ========== 检测Chirp A位置 ==========
-    print("正在检测Chirp A信号位置...")
+    # ========== 检测Chirp位置 ==========
+    print("正在检测Chirp信号位置...")
     
-    # 生成Chirp A用于检测（Target接收Anchor发送的Chirp A）
+    # 生成Chirp A和Chirp B用于检测
     chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, 
                             duration=0.5, amplitude=0.95, method='linear')
+    chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, 
+                            duration=0.5, amplitude=0.95, method='linear')
     
-    # 检测chirp A位置
+    # 检测chirp位置
     t_B1, corr_A = find_chirp_position(audio, chirp_A, sample_rate)
+    t_B2, corr_B = find_chirp_position(audio, chirp_B, sample_rate)
     
     chirp_duration = len(chirp_A) / sample_rate
     
-    # 计算预期的Chirp B播放时间
-    expected_chirp_b_time = t_B1 + CHIRP_B_DELAY
-    
-    print(f"  Chirp A检测: 时间={t_B1:.3f}s, 相关度={corr_A:.3f}")
-    print(f"  预期Chirp B播放: 时间={expected_chirp_b_time:.3f}s (延迟={CHIRP_B_DELAY}s)")
+    print(f"  Chirp A: 时间={t_B1:.3f}s, 相关度={corr_A:.3f}")
+    print(f"  Chirp B: 时间={t_B2:.3f}s, 相关度={corr_B:.3f}")
+    print(f"  时间差: Δt = {t_B2 - t_B1:.3f}s")
     
     # 创建图形
     fig, axes = plt.subplots(4, 1, figsize=(16, 12))
@@ -74,16 +75,11 @@ def visualize_target_audio(filepath, save_path=None):
     ax1.grid(True, alpha=0.3)
     ax1.set_xlim(0, duration)
     
-    # 标注检测到的Chirp A位置
+    # 标注检测到的Chirp位置（使用实际检测值）
     ax1.axvspan(t_B1, t_B1 + chirp_duration, alpha=0.3, color='green', label=f'Chirp A (相关度={corr_A:.2f})')
+    ax1.axvspan(t_B2, t_B2 + chirp_duration, alpha=0.3, color='orange', label=f'Chirp B (相关度={corr_B:.2f})')
     ax1.axvline(t_B1, color='green', linewidth=2, linestyle='--', alpha=0.8)
-    
-    # 标注预期的Chirp B播放时间
-    if expected_chirp_b_time < duration:
-        ax1.axvspan(expected_chirp_b_time, expected_chirp_b_time + chirp_duration, 
-                   alpha=0.2, color='orange', label=f'预期Chirp B播放')
-        ax1.axvline(expected_chirp_b_time, color='orange', linewidth=2, linestyle=':', alpha=0.8)
-    
+    ax1.axvline(t_B2, color='orange', linewidth=2, linestyle='--', alpha=0.8)
     ax1.legend(loc='upper right', fontsize=9)
     
     # ========== 2. 能量包络 ==========
@@ -109,9 +105,7 @@ def visualize_target_audio(filepath, save_path=None):
     
     # 标注chirp位置
     ax2.axvline(t_B1, color='green', linewidth=2, linestyle='--', alpha=0.8, label='Chirp A')
-    if expected_chirp_b_time < duration:
-        ax2.axvline(expected_chirp_b_time, color='orange', linewidth=2, linestyle=':', 
-                   alpha=0.8, label='预期Chirp B播放')
+    ax2.axvline(t_B2, color='orange', linewidth=2, linestyle='--', alpha=0.8, label='Chirp B')
     ax2.legend(loc='upper right', fontsize=9)
     
     # ========== 3. 局部放大：Chirp A 区域 ==========
@@ -132,38 +126,30 @@ def visualize_target_audio(filepath, save_path=None):
     ax3.axvline(t_B1, color='darkgreen', linewidth=2, linestyle='--', label=f'检测位置: {t_B1:.3f}s')
     ax3.set_xlabel('时间 (秒)', fontsize=11)
     ax3.set_ylabel('幅度', fontsize=11)
-    ax3.set_title(f'局部放大: Chirp A接收 (相关度={corr_A:.3f})', fontsize=12, fontweight='bold')
+    ax3.set_title(f'局部放大: Chirp A (相关度={corr_A:.3f})', fontsize=12, fontweight='bold')
     ax3.grid(True, alpha=0.3)
     ax3.legend(loc='upper right', fontsize=9)
     
-    # ========== 4. 局部放大：Chirp B 播放区域 ==========
+    # ========== 4. 局部放大：Chirp B 区域 ==========
     ax4 = axes[3]
     
-    if expected_chirp_b_time < duration - chirp_duration:
-        # 以预期播放位置为中心，前后各0.3秒
-        start_time = max(0, expected_chirp_b_time - margin)
-        end_time = min(duration, expected_chirp_b_time + chirp_duration + margin)
-        start_idx = int(start_time * sample_rate)
-        end_idx = int(end_time * sample_rate)
-        
-        local_audio = audio[start_idx:end_idx]
-        local_time = time_axis[start_idx:end_idx]
-        
-        ax4.plot(local_time, local_audio, linewidth=0.8, color='orange', alpha=0.8)
-        ax4.axvspan(expected_chirp_b_time, expected_chirp_b_time + chirp_duration, 
-                   alpha=0.3, color='orange')
-        ax4.axvline(expected_chirp_b_time, color='darkorange', linewidth=2, linestyle='--', 
-                   label=f'预期播放: {expected_chirp_b_time:.3f}s')
-        ax4.set_xlabel('时间 (秒)', fontsize=11)
-        ax4.set_ylabel('幅度', fontsize=11)
-        ax4.set_title(f'局部放大: Chirp B预期播放区域', fontsize=12, fontweight='bold')
-        ax4.grid(True, alpha=0.3)
-        ax4.legend(loc='upper right', fontsize=9)
-    else:
-        ax4.text(0.5, 0.5, 'Chirp B播放时间超出录音范围', 
-                ha='center', va='center', transform=ax4.transAxes, fontsize=12)
-        ax4.set_xlim(0, 1)
-        ax4.set_ylim(0, 1)
+    # 以检测到的位置为中心，前后各0.3秒
+    start_time = max(0, t_B2 - margin)
+    end_time = min(duration, t_B2 + chirp_duration + margin)
+    start_idx = int(start_time * sample_rate)
+    end_idx = int(end_time * sample_rate)
+    
+    local_audio = audio[start_idx:end_idx]
+    local_time = time_axis[start_idx:end_idx]
+    
+    ax4.plot(local_time, local_audio, linewidth=0.8, color='orange', alpha=0.8)
+    ax4.axvspan(t_B2, t_B2 + chirp_duration, alpha=0.3, color='orange')
+    ax4.axvline(t_B2, color='darkorange', linewidth=2, linestyle='--', label=f'检测位置: {t_B2:.3f}s')
+    ax4.set_xlabel('时间 (秒)', fontsize=11)
+    ax4.set_ylabel('幅度', fontsize=11)
+    ax4.set_title(f'局部放大: Chirp B (相关度={corr_B:.3f})', fontsize=12, fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.legend(loc='upper right', fontsize=9)
     
     # ========== 统计信息 ==========
     print("\n" + "="*60)
@@ -177,11 +163,14 @@ def visualize_target_audio(filepath, save_path=None):
     print(f"平均能量(RMS): {np.sqrt(np.mean(audio**2)):.4f}")
     
     # Chirp检测结果
-    print(f"\nChirp A检测结果:")
-    print(f"  检测位置 t_B1: {t_B1:.3f}s")
-    print(f"  相关度: {corr_A:.3f}")
-    print(f"  预期Chirp B播放时间: {expected_chirp_b_time:.3f}s")
-    print(f"  配置的延迟: {CHIRP_B_DELAY}s")
+    print(f"\nChirp检测结果:")
+    print(f"  Chirp A: 位置={t_B1:.3f}s, 相关度={corr_A:.3f}")
+    print(f"  Chirp B: 位置={t_B2:.3f}s, 相关度={corr_B:.3f}")
+    print(f"  时间差: Δt_B = {t_B2 - t_B1:.6f}s")
+    
+    # 距离估算（Target端视角）
+    distance_estimate = SOUND_SPEED * (t_B2 - t_B1) / 2
+    print(f"  简单距离估算: {distance_estimate:.2f}m (假设对称传播)")
     
     energy_arr = np.array(energy)
     if len(energy_arr) > 10:

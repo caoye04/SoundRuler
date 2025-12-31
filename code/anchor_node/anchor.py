@@ -58,11 +58,8 @@ class AnchorNode:
     def measure_distance(self):
         """执行一次测距"""
         # 生成chirp信号
-        # Chirp A用线性（已经很好）
         chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, 
                                 duration=0.5, amplitude=0.95, method='linear')
-
-        # Chirp B用对数（低频能量更多，传播更好）
         chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, 
                                 duration=0.5, amplitude=0.95, method='logarithmic')
 
@@ -89,17 +86,32 @@ class AnchorNode:
         
         try:
             # 打开音频流
-            input_stream = self.audio.open(...)
-            output_stream = self.audio.open(...)
+            input_stream = self.audio.open(
+                format=pyaudio.paFloat32,
+                channels=1,
+                rate=SAMPLE_RATE,
+                input=True,
+                input_device_index=self.input_device_index,
+                frames_per_buffer=CHUNK_SIZE
+            )
+            
+            output_stream = self.audio.open(
+                format=pyaudio.paFloat32,
+                channels=1,
+                rate=SAMPLE_RATE,
+                output=True,
+                output_device_index=self.output_device_index,
+                frames_per_buffer=CHUNK_SIZE  # 改为CHUNK_SIZE，不是len(chirp_A)
+            )
 
-            # ✅ 修复：在录音循环内部播放Chirp A
+            # 🔥 修复：在录音循环内播放Chirp A
             frame_idx = 0
             chirp_A_played = False
             
             while frame_idx < record_frames:
                 chunk_size = min(CHUNK_SIZE, record_frames - frame_idx)
                 
-                # 在录音开始时立即播放 Chirp A
+                # 在第一个循环就播放 Chirp A
                 if not chirp_A_played:
                     self.log("播放 Chirp A")
                     output_stream.write(chirp_A.tobytes())
@@ -160,7 +172,7 @@ class AnchorNode:
             delta_B = delta_B_samples / SAMPLE_RATE
             
             # 计算设备A的时间差
-            delta_A = t_A2 - t_A1
+            delta_A = t_A1 - t_A2  # 🔥 修复：应该是 t_A2 - t_A1
             
             self.log(f"Δt_A = {delta_A:.6f}s")
             self.log(f"Δt_B = {delta_B:.6f}s")
@@ -175,7 +187,6 @@ class AnchorNode:
         except Exception as e:
             self.log(f"接收设备B数据失败: {e}")
             return None
-
     def run(self):
         """主循环"""
         try:

@@ -7,47 +7,67 @@ def generate_chirp(f_start, f_end, duration=CHIRP_DURATION, sample_rate=SAMPLE_R
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     chirp_signal = signal.chirp(t, f_start, duration, f_end, method='linear')
     
-    window = signal.windows.tukey(len(chirp_signal), alpha=0.1)
+    # 改这里：使用汉宁窗
+    window = signal.windows.hann(len(chirp_signal))
     chirp_signal = chirp_signal * window
     
     # 归一化
-    chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.95  # 提高音量
+    chirp_signal = chirp_signal / np.max(np.abs(chirp_signal)) * 0.95
     
     return chirp_signal.astype(np.float32)
 
 
 def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE):
-    """使用匹配滤波器检测信号位置（关键：时间反转）"""
+    """使用标准NCC（归一化互相关）检测信号位置"""
     
-    # 🔥 关键：时间反转参考信号（匹配滤波器）
-    reversed_chirp = chirp_ref[::-1]
+    N = len(chirp_ref)
+    M = len(recorded_data)
     
-    # 使用 valid 模式卷积
-    correlation = np.convolve(recorded_data, reversed_chirp, mode='valid')
+    if M < N:
+        return 0.0, 0.0
     
-    # 找最大值位置
-    max_idx = np.argmax(np.abs(correlation))
+    # 1. 标准互相关（不要时间反转！）
+    correlation = signal.correlate(recorded_data, chirp_ref, mode='valid')
     
-    # 转换为时间（秒）
-    delay_time = max_idx / sample_rate
+    # 2. 计算局部能量
+    recording_sq = recorded_data ** 2
+    window_ones = np.ones(N)
+    local_energy_sq = signal.correlate(recording_sq, window_ones, mode='valid')
+    local_energy = np.sqrt(np.maximum(local_energy_sq, 1e-10))
     
-    # 相关度（归一化）
-    max_correlation = np.abs(correlation[max_idx])
-    ref_energy = np.sqrt(np.sum(chirp_ref ** 2))
+    # 3. 参考信号能量
+    template_energy = np.sqrt(np.sum(chirp_ref ** 2))
     
-    # 计算局部能量
-    window_size = len(chirp_ref)
-    start_idx = max_idx
-    end_idx = min(start_idx + window_size, len(recorded_data))
-    local_energy = np.sqrt(np.sum(recorded_data[start_idx:end_idx] ** 2))
+    # 4. NCC 归一化互相关系数
+    ncc = correlation / (local_energy * template_energy + 1e-10)
+    abs_ncc = np.abs(ncc)
     
-    normalized_corr = max_correlation / (local_energy * ref_energy + 1e-10)
+    # 5. 寻找全局最大值
+    max_idx = np.argmax(abs_ncc)
+    max_val = abs_ncc[max_idx]
+    
+    # 6. 抛物线插值（亚样本精度）
+    if 0 < max_idx < len(abs_ncc) - 1:
+        y0 = abs_ncc[max_idx - 1]
+        y1 = abs_ncc[max_idx]
+        y2 = abs_ncc[max_idx + 1]
+        denom = 2 * (y0 - 2*y1 + y2)
+        if abs(denom) > 1e-10:
+            delta = (y0 - y2) / denom
+            peak_idx = max_idx + delta
+        else:
+            peak_idx = max_idx
+    else:
+        peak_idx = max_idx
+    
+    # 7. 转换为时间
+    delay_time = peak_idx / sample_rate
+    normalized_corr = max_val
     
     if DEBUG_MODE:
-        print(f"  [检测] 位置={delay_time:.3f}s (索引={max_idx}), 相关度={normalized_corr:.3f}")
+        print(f"  [检测] 位置={delay_time:.3f}s (索引={peak_idx:.1f}), 相关度={normalized_corr:.3f}")
     
     return delay_time, normalized_corr
-
 
 def calculate_distance_beepbeep(t_A1, t_A2, t_B1, t_B2):
     """BeepBeep算法计算距离

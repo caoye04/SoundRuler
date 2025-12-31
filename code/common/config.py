@@ -7,18 +7,16 @@ SERVER_PORT = 20000
 # 音频配置
 SAMPLE_RATE = 48000  # 参考代码用的48kHz
 CHANNELS = 1
-CHUNK_SIZE = 4800
+CHUNK_SIZE = 960
 
-# 信号参数（对齐参考代码）
-CHIRP_DURATION = 0.8  # 0.5秒
-FREQ_A_START = 2000
-FREQ_A_END = 4000
-FREQ_B_START = 4500   # 不重叠！
-FREQ_B_END = 6500
+CHIRP_DURATION = 0.5  # 从0.8改到0.5，缩短信号
+FREQ_A_START = 2000   # 保持原来的
+FREQ_A_END = 4000     # 保持原来的
+FREQ_B_START = 4500   # 保持原来的
+FREQ_B_END = 6500     # 保持原来的
 
-# 时序参数（关键改变）
-TOTAL_RECORD_TIME = 3.0     # 录音3秒
-CHIRP_B_DELAY = 1.5         # 设备B延迟1.5秒发送
+TOTAL_RECORD_TIME = 2.5  # 从3.0缩短到2.5
+CHIRP_B_DELAY = 1.2      
 
 # 物理参数
 SOUND_SPEED = 343.0

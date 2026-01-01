@@ -243,10 +243,10 @@ if __name__ == "__main__":
    os.makedirs(output_dir, exist_ok=True)
    
    # 查找所有anchor开头的wav文件
-   wav_files = glob.glob(os.path.join(input_dir, "anchor_*.wav"))
+   wav_files = glob.glob(os.path.join(input_dir, "*.wav"))
    
    if not wav_files:
-       print(f"错误: 在 {input_dir} 目录下没有找到 anchor_*.wav 文件")
+       print(f"错误: 在 {input_dir} 目录下没有找到 *.wav 文件")
        print(f"请确保录音文件保存在 {input_dir} 目录中")
        sys.exit(1)
    

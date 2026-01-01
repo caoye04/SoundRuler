@@ -3,11 +3,16 @@ import time
 import threading
 import pyaudio
 import numpy as np
+import datetime
 
 sys.path.append("..")
 from common.config import *
-from common.signal_processing import *
+from common.signal_processing import generate_chirp, find_chirp_position, save_debug_audio
 from common.net_transport import AnchorServer, logger
+
+# === 调试配置 ===
+SAVE_AUDIO = True
+DISTANCE_OFFSET = 40.0 # 根据你的实际情况填写，现在这个值会很稳定
 
 class AnchorNode:
     def __init__(self):
@@ -20,6 +25,28 @@ class AnchorNode:
         
         self.chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
         self.chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
+        
+        self.history = []
+
+        # ==========================================
+        # 核心改动：在初始化时就打开流，并一直保持
+        # ==========================================
+        logger.info("正在初始化音频流 (Long-lived Streams)...")
+        # 输出流 (播放)
+        self.stream_out = self.audio.open(
+            format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+            output=True, output_device_index=self.output_device_index
+        )
+        # 输入流 (录音)
+        self.stream_in = self.audio.open(
+            format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+            input=True, input_device_index=self.input_device_index,
+            frames_per_buffer=CHUNK_SIZE
+        )
+        # 预热：写入一点静音，读取一点垃圾数据
+        self.stream_out.write(np.zeros(CHUNK_SIZE, dtype=np.float32).tobytes())
+        self.stream_in.start_stream() 
+        logger.info("音频流已锁定。")
 
     def _find_devices(self):
         info = self.audio.get_host_api_info_by_index(0)
@@ -30,110 +57,118 @@ class AnchorNode:
             if dev.get('maxOutputChannels') > 0 and self.output_device_index is None:
                 self.output_device_index = i
 
-    def _play_A(self):
+    def _flush_input(self):
+        """清空麦克风缓冲区中的旧数据"""
+        # 读取并丢弃当前缓冲区的所有数据
+        if self.stream_in.get_read_available() > 0:
+            bytes_to_read = self.stream_in.get_read_available()
+            self.stream_in.read(bytes_to_read, exception_on_overflow=False)
+
+    def _play_A_thread(self):
+        """在专用线程中播放"""
         try:
-            stream = self.audio.open(
-                format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
-                output=True, output_device_index=self.output_device_index
-            )
-            stream.write(self.chirp_A.tobytes())
-            stream.stop_stream()
-            stream.close()
+            self.stream_out.write(self.chirp_A.tobytes())
         except Exception as e:
             logger.error(f"Play Error: {e}")
 
     def measure_cycle(self):
-        # 1. 告诉 Target: "请开始录音"
-        if not self.net.send_cmd({"cmd": "START"}):
-            return None
-
-        # 2. [关键修改] Anchor 主动等待 0.8秒
-        # 你的耳朵是对的，Anchor 先响。但为了让 Target 能录到，
-        # 我们必须等 Target 的麦克风初始化完毕（Windows上可能要 0.5s）
+        # 1. 握手
+        if not self.net.send_cmd({"cmd": "START"}): return None
+        
+        # 2. 关键：清空之前的录音缓存，保证时间轴对齐
+        self._flush_input()
+        
+        # 3. 等待 Target 就绪 (0.8s)
         time.sleep(0.8)
 
-        # 3. Anchor 开始录音 & 播放
-        # 录音时长加长到 2.5s，确保万无一失
-        frames = int(SAMPLE_RATE * 2.5)
+        # 4. 录音 & 播放
+        # 不需要 open/close，直接 read/write
+        frames_to_record = int(SAMPLE_RATE * 2.5)
+        buffer = []
         
-        # 开启录音流
-        try:
-            stream = self.audio.open(
-                format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
-                input=True, input_device_index=self.input_device_index,
-                frames_per_buffer=CHUNK_SIZE
-            )
+        # 启动播放线程
+        threading.Thread(target=self._play_A_thread).start()
+        
+        # 循环读取
+        total_read = 0
+        while total_read < frames_to_record:
+            # 注意：这里不能阻塞太久，否则会影响时序
+            data = self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
+            buffer.append(data)
+            total_read += CHUNK_SIZE
             
-            # 立即播放 A
-            threading.Thread(target=self._play_A).start()
-            
-            # 阻塞读取
-            buffer = np.zeros(frames, dtype=np.float32)
-            idx = 0
-            while idx < frames:
-                data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                arr = np.frombuffer(data, dtype=np.float32)
-                end = min(idx + len(arr), frames)
-                buffer[idx:end] = arr[:end-idx]
-                idx = end
-            
-            stream.stop_stream()
-            stream.close()
+        # 拼接数据
+        full_buffer = np.frombuffer(b''.join(buffer), dtype=np.float32)
+        # 截取需要的长度
+        full_buffer = full_buffer[:frames_to_record]
 
-        except Exception as e:
-            logger.error(f"Record Error: {e}")
-            return None
-
-        # 4. 接收结果
+        # 5. 接收 Target 数据
         resp = self.net.recv_resp(timeout=3.0)
+        ts = datetime.datetime.now().strftime("%H%M%S")
+        
         if not resp:
-            print("\r [超时] Target 没有回应", end="")
+            if SAVE_AUDIO: save_debug_audio(full_buffer, f"{ts}_NoResp.wav")
             return None
         
-        # 5. 检查 Target 的听力情况
-        target_corr_A = resp.get('corr_A', 0)
-        target_corr_B = resp.get('corr_B', 0)
         delta_B = float(resp.get('delta', 0)) / SAMPLE_RATE
-
-        # 6. 本地信号分析
-        t_A, corr_A = find_chirp_position(buffer, self.chirp_A, SAMPLE_RATE)
-        t_B, corr_B = find_chirp_position(buffer, self.chirp_B, SAMPLE_RATE)
         
-        # 7. 诊断输出
-        # 如果 Target 听不到 A，这里会直接告诉你
-        if target_corr_A < 0.2:
-            print(f"\r [故障] Target 听不到 Anchor的声音 (Corr={target_corr_A:.2f})  ", end="")
+        # 6. 分析
+        t_A, corr_A = find_chirp_position(full_buffer, self.chirp_A, SAMPLE_RATE)
+        t_B, corr_B = find_chirp_position(full_buffer, self.chirp_B, SAMPLE_RATE)
+        
+        if corr_A < 0.3 or corr_B < 0.3:
+            print(f"\r [信号差] A:{corr_A:.2f} B:{corr_B:.2f}", end="")
+            if SAVE_AUDIO: save_debug_audio(full_buffer, f"{ts}_BadSignal.wav")
             return None
 
-        if corr_B < 0.2:
-            print(f"\r [故障] Anchor 听不到 Target的声音 (Corr={corr_B:.2f})  ", end="")
-            return None
+        # 7. 计算
+        delta_A = t_B - t_A
+        time_diff = delta_A - delta_B
+        raw_dist = (time_diff * 343.0) / 2.0
+        
+        if SAVE_AUDIO: 
+             save_debug_audio(full_buffer, f"{ts}_OK_{raw_dist:.1f}m.wav")
 
-        # 8. 计算距离
-        delta_A = t_B - t_A # Anchor 测得的时间差
-        
-        dist = calculate_distance_beepbeep(0, delta_A, 0, delta_B)
-        
-        return dist
+        return raw_dist
 
     def run(self):
         self.net.start()
-        logger.info("Anchor Ready. Waiting for Target...")
+        logger.info(f"Anchor Ready. Offset: {DISTANCE_OFFSET}m")
         
         while True:
             if not self.net.client_conn:
                 time.sleep(1)
                 continue
 
-            dist = self.measure_cycle()
-            
-            if dist is not None:
-                if 0 < dist < 100:
-                    print(f"\r >>> 距离: {dist:.3f}m                              ", end="")
-                else:
-                    print(f"\r [数据异常] {dist:.3f}m (时序错误?)                  ", end="")
+            try:
+                raw = self.measure_cycle()
+                
+                if raw is not None:
+                    real_dist = raw - DISTANCE_OFFSET
+                    self.history.append(real_dist)
+                    if len(self.history) > 5: self.history.pop(0)
+                    median_dist = np.median(self.history)
+                    
+                    status = "✅" if abs(median_dist) < 50 else "❌"
+                    print(f"\r {status} 稳定测量: {median_dist:.3f}m (原始: {raw:.2f}m) | 抖动: {np.std(self.history):.2f}", end="")
+                
+            except Exception as e:
+                logger.error(f"Loop Error: {e}")
+                # 出错时尝试重启流
+                try:
+                    self.stream_in.stop_stream()
+                    self.stream_in.start_stream()
+                except: pass
             
             time.sleep(0.1)
+    
+    def __del__(self):
+        # 退出时清理
+        self.stream_out.stop_stream()
+        self.stream_out.close()
+        self.stream_in.stop_stream()
+        self.stream_in.close()
+        self.audio.terminate()
 
 if __name__ == "__main__":
     AnchorNode().run()

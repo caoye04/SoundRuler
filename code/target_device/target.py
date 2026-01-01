@@ -74,19 +74,14 @@ class TargetDevice:
         if start_msg != "START":
             return "ERROR"
         
-        self.log("收到START信号")
-        
-        # 小延迟，让锚节点先稳定播放（网络延迟+音频启动时间）
-        time.sleep(0.05)
-        
-        self.log("开始录音")
+        self.log("收到START信号，准备录音流...")
         
         # 准备录音缓冲区
         record_frames = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
         recorded_data = np.zeros(record_frames, dtype=np.float32)
         
         try:
-            # 打开音频流
+            # 先打开音频流
             input_stream = self.audio.open(
                 format=pyaudio.paFloat32,
                 channels=CHANNELS,
@@ -104,6 +99,10 @@ class TargetDevice:
                 output_device_index=self.output_device_index,
                 frames_per_buffer=len(chirp_B)
             )
+            
+            # 音频流准备好后，发送READY确认
+            self.client_socket.sendall(b"READY\n")
+            self.log("已发送READY确认，开始录音")
 
             # 立即开始录音，延迟播放 Chirp B
             frame_idx = 0

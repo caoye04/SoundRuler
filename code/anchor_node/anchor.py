@@ -12,7 +12,7 @@ from common.net_transport import AnchorServer, logger
 
 # === 调试配置 ===
 SAVE_AUDIO = True
-DISTANCE_OFFSET = 40.0 # 根据你的实际情况填写，现在这个值会很稳定
+DISTANCE_OFFSET = 0.0
 
 class AnchorNode:
     def __init__(self):

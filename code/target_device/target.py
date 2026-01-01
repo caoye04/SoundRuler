@@ -1,15 +1,13 @@
 """
-目标设备（设备 B）- BeepBeep 声波测距 - 持续录音版本
+目标设备（设备 B）- BeepBeep 声波测距 (优化版)
 """
-
 import sys
 import socket
 import time
+import threading
 import pyaudio
 import numpy as np
 from datetime import datetime
-import threading
-from collections import deque
 
 sys.path.append("..")
 from common.config import *
@@ -20,13 +18,6 @@ class TargetDevice:
         self.server_ip = server_ip
         self.audio = pyaudio.PyAudio()
         self.client_socket = None
-        
-        # 持续录音缓冲区（环形缓冲）
-        self.buffer_duration = TOTAL_RECORD_TIME + 1.0
-        self.buffer_size = int(SAMPLE_RATE * self.buffer_duration)
-        self.audio_buffer = deque(maxlen=self.buffer_size)
-        self.recording = False
-        
         self.input_device_index = None
         self.output_device_index = None
         self.find_audio_devices()
@@ -35,205 +26,116 @@ class TargetDevice:
         print(f"[目标设备] {msg}")
 
     def find_audio_devices(self):
-        """查找音频设备"""
         info = self.audio.get_host_api_info_by_index(0)
-        num_devices = info.get('deviceCount')
-        
-        for i in range(num_devices):
-            device_info = self.audio.get_device_info_by_host_api_device_index(0, i)
-            
-            if device_info.get('maxInputChannels') > 0 and self.input_device_index is None:
+        for i in range(info.get('deviceCount')):
+            dev = self.audio.get_device_info_by_host_api_device_index(0, i)
+            if dev.get('maxInputChannels') > 0 and self.input_device_index is None:
                 self.input_device_index = i
-            
-            if device_info.get('maxOutputChannels') > 0 and self.output_device_index is None:
+            if dev.get('maxOutputChannels') > 0 and self.output_device_index is None:
                 self.output_device_index = i
-        
-        self.log(f"使用输入设备: {self.input_device_index}, 输出设备: {self.output_device_index}")
-
-    def continuous_recording(self):
-        """持续录音线程"""
-        try:
-            input_stream = self.audio.open(
-                format=pyaudio.paFloat32,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                input=True,
-                input_device_index=self.input_device_index,
-                frames_per_buffer=CHUNK_SIZE
-            )
-            
-            self.log("持续录音已启动")
-            
-            while self.recording:
-                try:
-                    audio_chunk = input_stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                    chunk_data = np.frombuffer(audio_chunk, dtype=np.float32)
-                    
-                    # 添加到环形缓冲区
-                    for sample in chunk_data:
-                        self.audio_buffer.append(sample)
-                        
-                except IOError:
-                    continue
-                    
-            input_stream.stop_stream()
-            input_stream.close()
-            self.log("持续录音已停止")
-            
-        except Exception as e:
-            self.log(f"录音线程错误: {e}")
+        self.log(f"IO设备: In={self.input_device_index}, Out={self.output_device_index}")
 
     def connect(self):
-        """连接到锚节点"""
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_socket.connect((self.server_ip, SERVER_PORT))
-        self.log(f"已连接到锚节点: {self.server_ip}:{SERVER_PORT}")
+        while True:
+            try:
+                self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client_socket.connect((self.server_ip, SERVER_PORT))
+                self.log(f"已连接到 {self.server_ip}")
+                break
+            except:
+                self.log("连接失败，重试中...")
+                time.sleep(2)
 
-    def get_buffer_snapshot(self):
-        """获取当前缓冲区快照"""
-        return np.array(list(self.audio_buffer), dtype=np.float32)
+    def play_sound_delayed(self, data, delay_sec):
+        """延迟并在独立线程播放"""
+        def _play():
+            time.sleep(delay_sec) # 等待Anchor播放A并在空气中传播
+            try:
+                stream = self.audio.open(
+                    format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+                    output=True, output_device_index=self.output_device_index
+                )
+                stream.write(data.tobytes())
+                stream.stop_stream()
+                stream.close()
+            except Exception as e:
+                self.log(f"播放异常: {e}")
+        threading.Thread(target=_play, daemon=True).start()
 
-    def measure_distance(self):
-        """执行一次测距"""
-        # 生成chirp信号
-        chirp_A = generate_chirp(
-            FREQ_A_START, 
-            FREQ_A_END, 
-            duration=CHIRP_A_DURATION,
-            sample_rate=SAMPLE_RATE,
-            amplitude=0.95,
-            method='linear'
-        )
+    def measure_loop(self):
+        chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
+        chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
 
-        chirp_B = generate_chirp(
-            FREQ_B_START, 
-            FREQ_B_END, 
-            duration=CHIRP_B_DURATION,
-            sample_rate=SAMPLE_RATE,
-            amplitude=0.95,
-            method='linear'
-        )
+        while True:
+            try:
+                # 1. 等待开始命令
+                cmd = self.client_socket.recv(1024).decode().strip()
+                if not cmd: break # 连接断开
+                if cmd != "SYNC_START": continue
 
-        # 等待锚节点START信号
-        start_msg = self.client_socket.recv(1024).decode().strip()
-        if start_msg != "START":
-            return "ERROR"
-        
-        self.log("收到START信号")
-        
-        try:
-            # 打开播放流
-            output_stream = self.audio.open(
-                format=pyaudio.paFloat32,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                output=True,
-                output_device_index=self.output_device_index,
-                frames_per_buffer=len(chirp_B)
-            )
-            
-            # 发送READY确认
-            self.client_socket.sendall(b"READY\n")
-            self.log("已发送READY，等待延迟播放")
-            
-            # 延迟后播放 Chirp B
-            time.sleep(CHIRP_B_DELAY)
-            output_stream.write(chirp_B.tobytes())
-            self.log(f"播放 Chirp B (延迟 {CHIRP_B_DELAY}s)")
-            
-            output_stream.stop_stream()
-            output_stream.close()
-            
-            # 等待录音完成
-            time.sleep(TOTAL_RECORD_TIME - CHIRP_B_DELAY)
-            
-            # 获取录音数据
-            recorded_data = self.get_buffer_snapshot()
-            
-            # 只取最后TOTAL_RECORD_TIME秒的数据
-            record_samples = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
-            if len(recorded_data) > record_samples:
-                recorded_data = recorded_data[-record_samples:]
-            
-        except Exception as e:
-            self.log(f"录音错误: {e}")
-            return "ERROR"
+                # 2. 立即开启录音 (先听)
+                frames_to_record = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
+                recorded_data = np.zeros(frames_to_record, dtype=np.float32)
+                
+                stream = self.audio.open(
+                    format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+                    input=True, input_device_index=self.input_device_index,
+                    frames_per_buffer=CHUNK_SIZE
+                )
 
-        self.log("分析信号...")
-        
-        # 检查录音数据
-        max_amplitude = np.max(np.abs(recorded_data))
-        self.log(f"录音最大振幅: {max_amplitude:.4f}")
-        
-        if max_amplitude < 0.001:
-            self.log("警告：录音数据几乎为空，可能麦克风未工作")
-        
-        # 保存调试音频
-        if SAVE_AUDIO:
-            timestamp = datetime.now().strftime("%H%M%S")
-            save_debug_audio(recorded_data, f"target_{timestamp}.wav", SAMPLE_RATE)
-        
-        # 检测信号
-        self.log("检测 Chirp A...")
-        t_B1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
-        
-        self.log("检测 Chirp B...")
-        t_B2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
-        
-        self.log(f"✓ Chirp A: t={t_B1:.3f}s, 相关度={corr_A:.3f}")
-        self.log(f"✓ Chirp B: t={t_B2:.3f}s, 相关度={corr_B:.3f}")
-        
-        # 发送样本数差
-        p1 = int(t_B1 * SAMPLE_RATE)
-        p2 = int(t_B2 * SAMPLE_RATE)
-        delta_samples = p2 - p1
-        
-        self.log(f"发送样本数差: {delta_samples}")
-        
-        return str(delta_samples)
+                # 3. 通知Anchor "我正在听，你可以播放A了"
+                self.client_socket.sendall(b"LISTENING\n")
+
+                # 4. 安排 Chirp B 的延迟播放 (非阻塞)
+                # 必须延迟足够久，让A先到达，但也必须在录音结束前
+                self.play_sound_delayed(chirp_B, CHIRP_B_DELAY)
+
+                # 5. 录制循环
+                idx = 0
+                while idx < frames_to_record:
+                    data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                    decoded = np.frombuffer(data, dtype=np.float32)
+                    end = min(idx + len(decoded), frames_to_record)
+                    recorded_data[idx:end] = decoded[:end-idx]
+                    idx = end
+                
+                stream.stop_stream()
+                stream.close()
+
+                # 6. 分析与回传
+                if SAVE_AUDIO:
+                    ts = datetime.now().strftime("%H%M%S")
+                    save_debug_audio(recorded_data, f"target_{ts}.wav", SAMPLE_RATE)
+
+                t_B1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
+                t_B2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
+
+                self.log(f"检测: A={t_B1:.4f}s, B={t_B2:.4f}s")
+
+                # 发送样本差 (t_B2 - t_B1) * Rate
+                delta_samples = int((t_B2 - t_B1) * SAMPLE_RATE)
+                self.client_socket.sendall(f"{delta_samples}\n".encode())
+
+            except socket.error:
+                self.log("连接断开")
+                break
+            except Exception as e:
+                self.log(f"错误: {e}")
+                self.client_socket.sendall(b"ERROR\n")
 
     def run(self):
-        """主循环"""
         try:
-            # 启动持续录音
-            self.recording = True
-            recording_thread = threading.Thread(target=self.continuous_recording, daemon=True)
-            recording_thread.start()
-            
-            # 等待录音线程启动
-            time.sleep(0.5)
-            
             self.connect()
-            self.log("="*50)
-            self.log("BeepBeep 声波测距系统启动（持续录音模式）")
-            self.log("等待锚节点发起测距")
-            self.log("="*50)
-
-            while True:
-                result = self.measure_distance()
-                
-                if result != "ERROR":
-                    self.client_socket.sendall(f"{result}\n".encode())
-                else:
-                    self.client_socket.sendall(b"ERROR\n")
-                
-                time.sleep(0.5)
-                
+            self.measure_loop()
         except KeyboardInterrupt:
-            self.log("\n用户终止")
+            self.log("退出")
         finally:
-            self.recording = False
-            time.sleep(0.2)
-            if self.client_socket:
-                self.client_socket.close()
+            if self.client_socket: self.client_socket.close()
             self.audio.terminate()
-            self.log("已退出")
 
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description="目标设备（BeepBeep）")
-    parser.add_argument("--server-ip", required=True, help="锚节点IP地址")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--server-ip", required=True)
     args = parser.parse_args()
-    
     TargetDevice(args.server_ip).run()

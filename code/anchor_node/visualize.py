@@ -123,7 +123,7 @@ def visualize_anchor_audio(filepath, save_path=None):
    ax2.set_xlabel('时间 (秒)', fontsize=11)
    ax2.set_ylabel('频率 (Hz)', fontsize=11)
    ax2.set_title('频谱图（时频分析）', fontsize=12, fontweight='bold')
-   ax2.set_ylim(0, 10000)  # 显示0-10kHz
+   ax2.set_ylim(0, 14000)  # 显示0-10kHz
    ax2.legend(loc='upper right', fontsize=9)
    
    # 添加颜色条

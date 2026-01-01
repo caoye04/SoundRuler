@@ -40,6 +40,8 @@ class AnchorState:
         self.last_update = None
         self.fps = 0.0
         self._timestamps = []
+        # 新增：测距控制状态
+        self.measuring = False  # 是否正在测距
     
     def update(self, raw_dist, median_dist, corr_A, corr_B, t_A, t_B, history, audio_file=None):
         with self._lock:
@@ -53,7 +55,7 @@ class AnchorState:
             self.measure_count += 1
             self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
             
-            # 更新历史记录 - 增加保存数量，添加音频文件名
+            # 更新历史记录
             self.history.insert(0, {
                 "time": self.last_update,
                 "distance": round(median_dist, 3),
@@ -62,7 +64,7 @@ class AnchorState:
                 "corr_B": round(corr_B, 3),
                 "t_A": round(t_A, 4),
                 "t_B": round(t_B, 4),
-                "audio_file": audio_file  # 新增：关联的音频文件名
+                "audio_file": audio_file
             })
             if len(self.history) > 100:
                 self.history.pop()
@@ -77,10 +79,35 @@ class AnchorState:
         with self._lock:
             self.connected = status
     
+    def set_measuring(self, status):
+        with self._lock:
+            self.measuring = status
+    
+    def is_measuring(self):
+        with self._lock:
+            return self.measuring
+    
+    def clear_data(self):
+        """清空所有测距数据"""
+        with self._lock:
+            self.distance = None
+            self.raw_distance = None
+            self.corr_A = 0.0
+            self.corr_B = 0.0
+            self.t_A = 0.0
+            self.t_B = 0.0
+            self.jitter = 0.0
+            self.measure_count = 0
+            self.history = []
+            self.last_update = None
+            self.fps = 0.0
+            self._timestamps = []
+    
     def get_state(self):
         with self._lock:
             return {
                 "connected": self.connected,
+                "measuring": self.measuring,  # 新增
                 "distance": round(self.distance, 3) if self.distance else None,
                 "raw_distance": round(self.raw_distance, 3) if self.raw_distance else None,
                 "corr_A": round(self.corr_A, 3),
@@ -104,6 +131,31 @@ def index():
 def get_status():
     return jsonify(state.get_state())
 
+# === 新增：控制 API ===
+@app.route('/api/control/start', methods=['POST'])
+def start_measuring():
+    """开始测距"""
+    if not state.connected:
+        return jsonify({"success": False, "message": "目标设备未连接"}), 400
+    state.set_measuring(True)
+    logger.info("测距已开始")
+    return jsonify({"success": True, "message": "测距已开始"})
+
+@app.route('/api/control/stop', methods=['POST'])
+def stop_measuring():
+    """停止测距"""
+    state.set_measuring(False)
+    logger.info("测距已停止")
+    return jsonify({"success": True, "message": "测距已停止"})
+
+@app.route('/api/control/clear', methods=['POST'])
+def clear_and_stop():
+    """停止并清空数据"""
+    state.set_measuring(False)
+    state.clear_data()
+    logger.info("测距已停止并清空数据")
+    return jsonify({"success": True, "message": "测距已停止并清空数据"})
+
 @app.route('/api/audio/<filename>')
 def get_audio(filename):
     """提供音频文件下载/播放"""
@@ -116,30 +168,22 @@ def get_audio(filename):
 @app.route('/api/analysis/<filename>')
 def get_analysis(filename):
     """获取或生成分析图像"""
-    # 从音频文件名生成对应的PNG文件名
     png_filename = filename.replace('.wav', '_analysis.png')
     png_path = os.path.join('debug_png', png_filename)
     audio_path = os.path.join('debug_audio', filename)
     
-    # 检查音频文件是否存在
     if not os.path.exists(audio_path):
         abort(404, description="Audio file not found")
     
-    # 如果PNG不存在，调用visualize生成
     if not os.path.exists(png_path):
         try:
-            # 确保输出目录存在
             os.makedirs('debug_png', exist_ok=True)
-            
-            # 调用visualize模块进行分析
             from visualize import visualize_anchor_audio
             import matplotlib
-            matplotlib.use('Agg')  # 使用非交互式后端
+            matplotlib.use('Agg')
             import matplotlib.pyplot as plt
-            
             visualize_anchor_audio(audio_path, png_path)
             plt.close('all')
-            
         except Exception as e:
             logger.error(f"Analysis generation failed: {e}")
             abort(500, description=f"Failed to generate analysis: {str(e)}")
@@ -176,7 +220,7 @@ class AnchorNode:
         self.chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
         
         self.history = []
-        self.last_audio_file = None  # 记录最后保存的音频文件名
+        self.last_audio_file = None
 
         logger.info("正在初始化音频流 (Long-lived Streams)...")
         self.stream_out = self.audio.open(
@@ -279,6 +323,11 @@ class AnchorNode:
                 continue
 
             state.set_connected(True)
+            
+            # === 关键修改：检查是否正在测距 ===
+            if not state.is_measuring():
+                time.sleep(0.2)  # 未开始测距时，降低CPU占用
+                continue
 
             try:
                 result = self.measure_cycle()
@@ -293,10 +342,8 @@ class AnchorNode:
                     if len(self.history) > 5: self.history.pop(0)
                     median_dist = np.median(self.history)
                     
-                    # 更新全局状态，传入音频文件名
                     state.update(raw, median_dist, corr_A, corr_B, t_A, t_B, self.history, audio_file)
                     
-                    # 将距离发送给Target
                     self.net.send_cmd({
                         "cmd": "DISTANCE",
                         "distance": round(float(median_dist), 3),

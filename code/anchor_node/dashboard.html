@@ -283,6 +283,12 @@
             background: var(--bg);
             border-radius: 8px;
             font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .history-item:hover {
+            background: #e8e8ed;
         }
 
         .history-time {
@@ -324,6 +330,205 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* ========== 悬浮提示框样式 ========== */
+        .tooltip {
+            position: absolute;
+            background: var(--card);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            z-index: 1000;
+            min-width: 220px;
+            pointer-events: auto;
+            border: 1px solid var(--border);
+        }
+
+        .tooltip-header {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tooltip-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+
+        .tooltip-label {
+            color: var(--text-secondary);
+        }
+
+        .tooltip-value {
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .tooltip-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .tooltip-btn {
+            flex: 1;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tooltip-btn.primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .tooltip-btn.primary:hover {
+            background: #0066d6;
+        }
+
+        .tooltip-btn.secondary {
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .tooltip-btn.secondary:hover {
+            background: #e0e0e5;
+        }
+
+        .tooltip-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* ========== 模态框样式 ========== */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s;
+        }
+
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal {
+            background: var(--card);
+            border-radius: 16px;
+            max-width: 90vw;
+            max-height: 90vh;
+            overflow: hidden;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            transform: scale(0.9);
+            transition: transform 0.3s;
+        }
+
+        .modal-overlay.active .modal {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .modal-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: var(--bg);
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            background: #e0e0e5;
+            color: var(--text);
+        }
+
+        .modal-body {
+            padding: 24px;
+            overflow: auto;
+            max-height: calc(90vh - 80px);
+        }
+
+        .modal-body img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+        }
+
+        .modal-loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* 音频指示器 */
+        .audio-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 8px;
+            color: var(--accent);
+            font-size: 11px;
+        }
+
+        .audio-indicator svg {
+            width: 14px;
+            height: 14px;
+        }
     </style>
 </head>
 <body>
@@ -357,7 +562,7 @@
             </div>
         </div>
 
-        <!-- 新增：距离折线图 -->
+        <!-- 距离折线图 -->
         <div class="card">
             <div class="card-header">
                 <span class="card-title">距离变化曲线</span>
@@ -412,7 +617,7 @@
             </div>
         </div>
 
-        <!-- 改进：可滚动的历史记录 -->
+        <!-- 历史记录 -->
         <div class="card">
             <div class="card-header">
                 <span class="card-title">历史记录</span>
@@ -428,13 +633,58 @@
         <footer>SoundRuler · BeepBeep Protocol</footer>
     </div>
 
+    <!-- 悬浮提示框 -->
+    <div class="tooltip" id="tooltip" style="display: none;">
+        <div class="tooltip-header" id="tooltipHeader">数据点详情</div>
+        <div id="tooltipContent"></div>
+        <div class="tooltip-buttons">
+            <button class="tooltip-btn secondary" id="btnPlayAudio">
+                <span>▶ 播放音频</span>
+            </button>
+            <button class="tooltip-btn primary" id="btnShowAnalysis">
+                <span>📊 分析图像</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- 分析图像模态框 -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-title" id="modalTitle">音频分析</span>
+                <button class="modal-close" id="modalClose">×</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在生成分析图像...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 隐藏的音频播放器 -->
+    <audio id="audioPlayer" style="display: none;"></audio>
+
     <script>
         const API_URL = '/api/status';
-        const MAX_CHART_POINTS = 50;  // 图表最多显示的点数
+        const MAX_CHART_POINTS = 50;
 
         // 图表数据
         let chartLabels = [];
         let chartData = [];
+        let chartHistory = [];  // 存储完整的历史数据用于tooltip
+
+        // 当前选中的数据点
+        let selectedPoint = null;
+        let currentAudioFile = null;
+
+        // DOM元素
+        const tooltip = document.getElementById('tooltip');
+        const modalOverlay = document.getElementById('modalOverlay');
+        const modalBody = document.getElementById('modalBody');
+        const modalTitle = document.getElementById('modalTitle');
+        const audioPlayer = document.getElementById('audioPlayer');
 
         // 初始化图表
         const ctx = document.getElementById('distanceChart').getContext('2d');
@@ -450,11 +700,14 @@
                     borderWidth: 2,
                     fill: true,
                     tension: 0.3,
-                    pointRadius: 3,
+                    pointRadius: 5,
                     pointBackgroundColor: '#007aff',
                     pointBorderColor: '#fff',
-                    pointBorderWidth: 1,
-                    pointHoverRadius: 5
+                    pointBorderWidth: 2,
+                    pointHoverRadius: 8,
+                    pointHoverBackgroundColor: '#007aff',
+                    pointHoverBorderColor: '#fff',
+                    pointHoverBorderWidth: 3
                 }]
             },
             options: {
@@ -464,14 +717,24 @@
                     duration: 300
                 },
                 interaction: {
-                    intersect: false,
-                    mode: 'index'
+                    intersect: true,
+                    mode: 'nearest'
+                },
+                onClick: (event, elements) => {
+                    if (elements.length > 0) {
+                        const index = elements[0].index;
+                        showTooltip(index, event);
+                    }
+                },
+                onHover: (event, elements) => {
+                    event.native.target.style.cursor = elements.length > 0 ? 'pointer' : 'default';
                 },
                 plugins: {
                     legend: {
                         display: false
                     },
                     tooltip: {
+                        enabled: true,
                         backgroundColor: 'rgba(0, 0, 0, 0.8)',
                         titleFont: { size: 12 },
                         bodyFont: { size: 12 },
@@ -479,6 +742,9 @@
                         cornerRadius: 8,
                         displayColors: false,
                         callbacks: {
+                            title: function(context) {
+                                return '点击查看详情';
+                            },
                             label: function(context) {
                                 return `距离: ${context.parsed.y.toFixed(3)} m`;
                             }
@@ -514,8 +780,149 @@
             }
         });
 
-        // 记录上次的测量次数，用于判断是否有新数据
         let lastMeasureCount = 0;
+
+        function showTooltip(index, event) {
+            const data = chartHistory[index];
+            if (!data) return;
+
+            selectedPoint = data;
+            currentAudioFile = data.audio_file;
+
+            // 更新tooltip内容
+            document.getElementById('tooltipHeader').textContent = `测量 @ ${data.time}`;
+            document.getElementById('tooltipContent').innerHTML = `
+                <div class="tooltip-row">
+                    <span class="tooltip-label">距离</span>
+                    <span class="tooltip-value">${data.distance.toFixed(3)} m</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">原始距离</span>
+                    <span class="tooltip-value">${data.raw_distance ? data.raw_distance.toFixed(3) : '--'} m</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">Chirp A 相关度</span>
+                    <span class="tooltip-value">${data.corr_A ? data.corr_A.toFixed(3) : '--'}</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">Chirp B 相关度</span>
+                    <span class="tooltip-value">${data.corr_B ? data.corr_B.toFixed(3) : '--'}</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">音频文件</span>
+                    <span class="tooltip-value">${data.audio_file || '无'}</span>
+                </div>
+            `;
+
+            // 设置按钮状态
+            const btnPlay = document.getElementById('btnPlayAudio');
+            const btnAnalysis = document.getElementById('btnShowAnalysis');
+            
+            if (data.audio_file) {
+                btnPlay.disabled = false;
+                btnAnalysis.disabled = false;
+            } else {
+                btnPlay.disabled = true;
+                btnAnalysis.disabled = true;
+            }
+
+            // 定位tooltip
+            const chartRect = document.getElementById('distanceChart').getBoundingClientRect();
+            const x = event.native.clientX;
+            const y = event.native.clientY;
+
+            tooltip.style.display = 'block';
+            tooltip.style.left = `${x + 15}px`;
+            tooltip.style.top = `${y - 10}px`;
+
+            // 确保tooltip不超出屏幕
+            const tooltipRect = tooltip.getBoundingClientRect();
+            if (tooltipRect.right > window.innerWidth) {
+                tooltip.style.left = `${x - tooltipRect.width - 15}px`;
+            }
+            if (tooltipRect.bottom > window.innerHeight) {
+                tooltip.style.top = `${y - tooltipRect.height + 10}px`;
+            }
+        }
+
+        function hideTooltip() {
+            tooltip.style.display = 'none';
+            selectedPoint = null;
+        }
+
+        // 点击页面其他区域隐藏tooltip
+        document.addEventListener('click', (e) => {
+            if (!tooltip.contains(e.target) && e.target.id !== 'distanceChart') {
+                hideTooltip();
+            }
+        });
+
+        // 播放音频按钮
+        document.getElementById('btnPlayAudio').addEventListener('click', () => {
+            if (currentAudioFile) {
+                audioPlayer.src = `/api/audio/${currentAudioFile}`;
+                audioPlayer.play();
+            }
+        });
+
+        // 显示分析图像按钮
+        document.getElementById('btnShowAnalysis').addEventListener('click', async () => {
+            if (!currentAudioFile) return;
+
+            // 显示模态框
+            modalOverlay.classList.add('active');
+            modalTitle.textContent = `音频分析 - ${currentAudioFile}`;
+            modalBody.innerHTML = `
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在生成分析图像...</span>
+                </div>
+            `;
+
+            try {
+                // 请求分析图像（会自动生成如果不存在）
+                const response = await fetch(`/api/analysis/${currentAudioFile}`);
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const imageUrl = URL.createObjectURL(blob);
+                    modalBody.innerHTML = `<img src="${imageUrl}" alt="音频分析图像">`;
+                } else {
+                    const error = await response.json();
+                    modalBody.innerHTML = `
+                        <div class="modal-loading">
+                            <span style="color: var(--error);">生成失败: ${error.description || '未知错误'}</span>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                modalBody.innerHTML = `
+                    <div class="modal-loading">
+                        <span style="color: var(--error);">请求失败: ${e.message}</span>
+                    </div>
+                `;
+            }
+
+            hideTooltip();
+        });
+
+        // 关闭模态框
+        document.getElementById('modalClose').addEventListener('click', () => {
+            modalOverlay.classList.remove('active');
+        });
+
+        modalOverlay.addEventListener('click', (e) => {
+            if (e.target === modalOverlay) {
+                modalOverlay.classList.remove('active');
+            }
+        });
+
+        // ESC键关闭
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                modalOverlay.classList.remove('active');
+                hideTooltip();
+            }
+        });
 
         function updateUI(data) {
             // 连接状态
@@ -550,34 +957,82 @@
             if (data.measure_count > lastMeasureCount && data.distance !== null) {
                 lastMeasureCount = data.measure_count;
                 
+                // 从history获取最新的数据点
+                const latestData = data.history[0];
+                
                 // 添加新数据点
                 chartLabels.push(data.last_update);
                 chartData.push(data.distance);
+                chartHistory.push(latestData);
                 
                 // 限制数据点数量
                 if (chartLabels.length > MAX_CHART_POINTS) {
                     chartLabels.shift();
                     chartData.shift();
+                    chartHistory.shift();
                 }
                 
-                distanceChart.update('none');  // 'none' 禁用动画以提高性能
+                distanceChart.update('none');
                 document.getElementById('chartPoints').textContent = chartData.length + ' 点';
             }
 
-            // 历史记录
+            // 历史记录（带音频标记）
             const histList = document.getElementById('historyList');
             if (data.history && data.history.length > 0) {
-                histList.innerHTML = data.history.map(h => {
+                histList.innerHTML = data.history.map((h, idx) => {
                     const valueClass = h.distance < 10 ? 'good' : (h.distance < 50 ? '' : 'warning');
+                    const audioIcon = h.audio_file ? `
+                        <span class="audio-indicator" title="有音频记录">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 3v18l-7-5.5V8.5L12 3zm1 0v18l7-5.5V8.5L13 3z"/>
+                            </svg>
+                        </span>
+                    ` : '';
                     return `
-                        <div class="history-item">
-                            <span class="history-time">${h.time}</span>
+                        <div class="history-item" data-index="${idx}" onclick="showHistoryDetail(${idx})">
+                            <span class="history-time">${h.time}${audioIcon}</span>
                             <span class="history-value ${valueClass}">${h.distance.toFixed(3)} m</span>
                         </div>
                     `;
                 }).join('');
                 document.getElementById('historyCount').textContent = data.history.length + ' 条';
             }
+        }
+
+        // 点击历史记录项显示详情
+        let historyData = [];
+        function showHistoryDetail(index) {
+            const data = historyData[index];
+            if (!data || !data.audio_file) return;
+
+            currentAudioFile = data.audio_file;
+            
+            // 显示模态框
+            modalOverlay.classList.add('active');
+            modalTitle.textContent = `音频分析 - ${data.audio_file}`;
+            modalBody.innerHTML = `
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在加载分析图像...</span>
+                </div>
+            `;
+
+            fetch(`/api/analysis/${data.audio_file}`)
+                .then(response => {
+                    if (response.ok) return response.blob();
+                    throw new Error('加载失败');
+                })
+                .then(blob => {
+                    const imageUrl = URL.createObjectURL(blob);
+                    modalBody.innerHTML = `<img src="${imageUrl}" alt="音频分析图像">`;
+                })
+                .catch(e => {
+                    modalBody.innerHTML = `
+                        <div class="modal-loading">
+                            <span style="color: var(--error);">加载失败: ${e.message}</span>
+                        </div>
+                    `;
+                });
         }
 
         function setCorrelation(valId, barId, val) {
@@ -603,6 +1058,7 @@
             try {
                 const resp = await fetch(API_URL);
                 const data = await resp.json();
+                historyData = data.history || [];  // 保存历史数据供详情使用
                 updateUI(data);
             } catch (e) {
                 console.error('Fetch error:', e);

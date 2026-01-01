@@ -4,7 +4,8 @@ import threading
 import pyaudio
 import numpy as np
 import datetime
-from flask import Flask, jsonify, send_from_directory
+import os
+from flask import Flask, jsonify, send_from_directory, send_file, abort
 from flask_cors import CORS
 
 sys.path.append("..")
@@ -37,7 +38,7 @@ class TargetState:
         self.raw_distance = None
         self.distance_history = []
     
-    def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples):
+    def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples, audio_file=None):
         with self._lock:
             self.corr_A = corr_A
             self.corr_B = corr_B
@@ -47,6 +48,17 @@ class TargetState:
             self.delta_time = t_B - t_A
             self.measure_count += 1
             self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            # 记录日志，包含音频文件信息
+            log_entry = {
+                "time": self.last_update,
+                "level": "OK",
+                "msg": f"测量完成 ΔT={t_B-t_A:.3f}s",
+                "audio_file": audio_file
+            }
+            self.logs.insert(0, log_entry)
+            if len(self.logs) > 100:
+                self.logs.pop()
     
     def update_distance(self, distance, raw_distance, time_str):
         """更新来自Anchor的距离数据"""
@@ -58,7 +70,13 @@ class TargetState:
             # 更新历史记录
             self.distance_history.insert(0, {
                 "time": time_str,
-                "distance": distance
+                "distance": distance,
+                "raw_distance": raw_distance,
+                "corr_A": self.corr_A,
+                "corr_B": self.corr_B,
+                "t_A": self.t_A,
+                "t_B": self.t_B,
+                "audio_file": self.logs[0].get("audio_file") if self.logs else None
             })
             if len(self.distance_history) > 100:
                 self.distance_history.pop()
@@ -68,14 +86,15 @@ class TargetState:
             self.connected = status
             self.server_ip = ip
     
-    def add_log(self, level, msg):
+    def add_log(self, level, msg, audio_file=None):
         with self._lock:
             self.logs.insert(0, {
                 "time": datetime.datetime.now().strftime("%H:%M:%S"),
                 "level": level,
-                "msg": msg
+                "msg": msg,
+                "audio_file": audio_file
             })
-            if len(self.logs) > 100:  # 增加日志保存量
+            if len(self.logs) > 100:
                 self.logs.pop()
     
     def get_state(self):
@@ -92,8 +111,7 @@ class TargetState:
                 "delta_time": round(self.delta_time, 4),
                 "measure_count": self.measure_count,
                 "last_update": self.last_update,
-                "logs": self.logs,  # 返回所有日志
-                # 新增字段
+                "logs": self.logs,
                 "distance": round(self.distance, 3) if self.distance is not None else None,
                 "raw_distance": round(self.raw_distance, 3) if self.raw_distance is not None else None,
                 "distance_history": self.distance_history
@@ -109,6 +127,56 @@ def index():
 def get_status():
     return jsonify(state.get_state())
 
+@app.route('/api/audio/<filename>')
+def get_audio(filename):
+    """提供音频文件下载/播放"""
+    audio_path = os.path.join('debug_audio', filename)
+    if os.path.exists(audio_path):
+        return send_file(audio_path, mimetype='audio/wav')
+    else:
+        abort(404, description="Audio file not found")
+
+@app.route('/api/analysis/<filename>')
+def get_analysis(filename):
+    """获取或生成分析图像"""
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    audio_path = os.path.join('debug_audio', filename)
+    
+    if not os.path.exists(audio_path):
+        abort(404, description="Audio file not found")
+    
+    if not os.path.exists(png_path):
+        try:
+            os.makedirs('debug_png', exist_ok=True)
+            
+            from visualize import visualize_target_audio
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            visualize_target_audio(audio_path, png_path)
+            plt.close('all')
+            
+        except Exception as e:
+            logger.error(f"Analysis generation failed: {e}")
+            abort(500, description=f"Failed to generate analysis: {str(e)}")
+    
+    if os.path.exists(png_path):
+        return send_file(png_path, mimetype='image/png')
+    else:
+        abort(500, description="Failed to generate analysis image")
+
+@app.route('/api/check_analysis/<filename>')
+def check_analysis(filename):
+    """检查分析图像是否存在"""
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    return jsonify({
+        "exists": os.path.exists(png_path),
+        "png_filename": png_filename
+    })
+
 def run_web_server():
     app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
 
@@ -120,6 +188,7 @@ class TargetDevice:
         self.net = TargetClient()
         self.input_device_index = None
         self.output_device_index = None
+        self.last_audio_file = None
         
         self._find_devices()
         
@@ -181,7 +250,7 @@ class TargetDevice:
             
             cmd = msg.get('cmd')
             
-            # **新增：处理距离更新消息**
+            # 处理距离更新消息
             if cmd == 'DISTANCE':
                 distance = msg.get('distance')
                 raw_distance = msg.get('raw_distance')
@@ -216,8 +285,14 @@ class TargetDevice:
                 
                 delta_samples = int((t_B - t_A) * SAMPLE_RATE)
                 
-                state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples)
-                state.add_log("OK", f"测量完成 ΔT={t_B-t_A:.3f}s")
+                # 保存音频文件
+                ts = datetime.datetime.now().strftime("%H%M%S")
+                audio_file = f"target_{ts}.wav"
+                if SAVE_AUDIO:
+                    save_debug_audio(full_buffer, audio_file)
+                self.last_audio_file = audio_file
+                
+                state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples, audio_file)
                 
                 logger.info(f"Process: A={corr_A:.2f}@t={t_A:.3f}s | B={corr_B:.2f}@t={t_B:.3f}s")
                 

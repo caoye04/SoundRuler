@@ -152,8 +152,7 @@ class AnchorNode:
         t_A1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
         
         self.log("检测 Chirp B...")
-        filtered_for_B = bandpass_filter(recorded_data, 4000, 7000, SAMPLE_RATE)
-        t_A2, corr_B = find_chirp_position(filtered_for_B, chirp_B, SAMPLE_RATE)
+        t_A2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
         
         self.log(f"✓ Chirp A: t={t_A1:.3f}s, 相关度={corr_A:.3f}")
         self.log(f"✓ Chirp B: t={t_A2:.3f}s, 相关度={corr_B:.3f}")

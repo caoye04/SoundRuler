@@ -18,10 +18,12 @@ class TargetDevice:
         self.input_device_index = None
         self.output_device_index = None
         self._find_devices()
+        
+        # 启动自检
+        self.test_speaker()
 
     def _find_devices(self):
-        # 扫描并打印所有设备，方便调试
-        logger.info("Scanning Audio Devices...")
+        logger.info("=== 扫描音频设备 ===")
         info = self.audio.get_host_api_info_by_index(0)
         found_in = False
         found_out = False
@@ -29,91 +31,84 @@ class TargetDevice:
         for i in range(info.get('deviceCount')):
             dev = self.audio.get_device_info_by_host_api_device_index(0, i)
             name = dev.get('name')
-            max_in = dev.get('maxInputChannels')
-            max_out = dev.get('maxOutputChannels')
+            m_in = dev.get('maxInputChannels')
+            m_out = dev.get('maxOutputChannels')
+            # 打印出来给你看
+            print(f"  [{i}] {name} (In:{m_in} Out:{m_out})")
             
-            # 自动选择逻辑
-            if max_in > 0 and self.input_device_index is None:
+            if m_in > 0 and self.input_device_index is None:
                 self.input_device_index = i
                 found_in = True
-            if max_out > 0 and self.output_device_index is None:
+            if m_out > 0 and self.output_device_index is None:
                 self.output_device_index = i
                 found_out = True
-                
-            # print(f"  [{i}] {name} (In:{max_in} Out:{max_out})")
-
-        if not found_in: logger.error("❌ No Input Device Found!")
-        if not found_out: logger.error("❌ No Output Device Found!")
         
-        logger.info(f"Selected: In=[{self.input_device_index}] Out=[{self.output_device_index}]")
+        logger.info(f"自动选择: In=[{self.input_device_index}] Out=[{self.output_device_index}]")
+        logger.info("如果不正确，请手动修改代码中的 device_index")
+
+    def test_speaker(self):
+        """启动时播放声音测试"""
+        logger.info("🔊 正在测试扬声器，你应该听到 '啾——' 的一声...")
+        chirp = generate_chirp(FREQ_B_START, FREQ_B_END, 1.0, SAMPLE_RATE)
+        try:
+            stream = self.audio.open(
+                format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+                output=True, output_device_index=self.output_device_index
+            )
+            stream.write(chirp.tobytes())
+            stream.stop_stream()
+            stream.close()
+            logger.info("✅ 播放测试完成")
+        except Exception as e:
+            logger.error(f"❌ 扬声器测试失败: {e}")
+            logger.error("请检查你的 output_device_index 是否正确！")
 
     def _play_thread(self, data, delay=0):
-        """
-        修复版播放线程：
-        1. 能够打印错误信息
-        2. 优化时序，减少 jitter
-        """
         def task():
             try:
-                # 尝试打开输出流 (如果在 delay 之前打开，可以测试设备是否可用)
-                # 注意：有些声卡不支持 Input/Output 同时打开（独占模式），
-                # 如果这里报错 "Device Unavailable"，说明声卡不支持全双工。
+                # 提前打开流，减少延迟抖动
                 stream = self.audio.open(
-                    format=pyaudio.paFloat32, 
-                    channels=CHANNELS, 
-                    rate=SAMPLE_RATE,
-                    output=True, 
-                    output_device_index=self.output_device_index
+                    format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+                    output=True, output_device_index=self.output_device_index
                 )
+                if delay > 0: time.sleep(delay)
                 
-                if delay > 0: 
-                    time.sleep(delay)
-                
-                # 写入数据
                 stream.write(data.tobytes())
                 stream.stop_stream()
                 stream.close()
-                
             except Exception as e:
-                # 关键：打印错误，不再静默失败
-                logger.error(f"🔈 Playback Failed: {e}")
-                
+                logger.error(f"Play Error: {e}")
         threading.Thread(target=task, daemon=True).start()
 
     def loop(self):
         chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
         chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
         
-        frames = int(SAMPLE_RATE * 1.2)
+        # 2.0s 录音buffer
+        frames = int(SAMPLE_RATE * 2.0)
         
         while True:
-            # 1. 阻塞等待 START 指令
             msg = self.net.recv_cmd()
             if not msg: 
-                logger.warning("Connection lost, reconnecting...")
+                logger.warning("连接断开...")
                 break
             
             if msg.get('cmd') != 'START':
                 continue
 
-            # 2. 收到指令，执行测距
-            stream = None
             try:
-                # 打开录音流
                 stream = self.audio.open(
-                    format=pyaudio.paFloat32, 
-                    channels=CHANNELS, 
-                    rate=SAMPLE_RATE,
-                    input=True, 
-                    input_device_index=self.input_device_index,
+                    format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+                    input=True, input_device_index=self.input_device_index,
                     frames_per_buffer=CHUNK_SIZE
                 )
                 
-                # 3. 启动播放线程 (延迟 0.6s)
-                # 此时主线程持有 Input Stream，子线程尝试打开 Output Stream
-                self._play_thread(chirp_B, delay=0.6)
+                # === 关键时序修改 ===
+                # 收到指令后，只等待 0.1s 就播放
+                # 这样可以抵消网络传输的时间，通常能落在 Anchor 的窗口内
+                self._play_thread(chirp_B, delay=0.1)
                 
-                # 4. 录制音频
+                # 录音
                 buffer = np.zeros(frames, dtype=np.float32)
                 idx = 0
                 while idx < frames:
@@ -125,23 +120,16 @@ class TargetDevice:
                 
                 stream.stop_stream()
                 stream.close()
-                stream = None # 标记已关闭
 
-                # 5. 计算结果
-                t_A, corr_A = find_chirp_position(buffer, chirp_A, SAMPLE_RATE)
-                t_B, corr_B = find_chirp_position(buffer, chirp_B, SAMPLE_RATE)
+                # 计算并回传
+                t_A, _ = find_chirp_position(buffer, chirp_A, SAMPLE_RATE)
+                t_B, _ = find_chirp_position(buffer, chirp_B, SAMPLE_RATE)
                 
-                # 调试信息：如果没声音，corr_B 会很低
-                # logger.info(f"Peaks: A={t_A:.3f}({corr_A:.2f}) B={t_B:.3f}({corr_B:.2f})")
-
                 delta_samples = int((t_B - t_A) * SAMPLE_RATE)
                 self.net.send_data({"delta": delta_samples})
 
             except Exception as e:
-                logger.error(f"Cycle Error: {e}")
-                if stream: 
-                    try: stream.close()
-                    except: pass
+                logger.error(f"Loop Error: {e}")
                 time.sleep(1)
 
     def run(self):

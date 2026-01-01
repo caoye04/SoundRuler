@@ -3,43 +3,23 @@ import time
 import threading
 import pyaudio
 import numpy as np
-from collections import deque
 
 sys.path.append("..")
 from common.config import *
 from common.signal_processing import *
 from common.net_transport import AnchorServer, logger
 
-class SimpleKalman:
-    """参考参考代码中的滤波逻辑，用于平滑距离跳变"""
-    def __init__(self, R=0.1, Q=0.1):
-        self.R = R # 测量噪声
-        self.Q = Q # 过程噪声
-        self.x = 0.0 # 估计值
-        self.p = 1.0 # 估计协方差
-
-    def update(self, measurement):
-        if measurement is None: return self.x
-        # 预测
-        p_pred = self.p + self.Q
-        # 更新
-        K = p_pred / (p_pred + self.R)
-        self.x = self.x + K * (measurement - self.x)
-        self.p = (1 - K) * p_pred
-        return self.x
-
 class AnchorNode:
     def __init__(self):
         self.audio = pyaudio.PyAudio()
         self.net = AnchorServer(SERVER_PORT)
-        self.filter = SimpleKalman(R=0.5, Q=0.1)
         
         self.input_device_index = None
         self.output_device_index = None
         self._find_devices()
 
     def _find_devices(self):
-        # (简化版设备查找)
+        # 简单查找逻辑：优先选有 Input 的设备
         info = self.audio.get_host_api_info_by_index(0)
         for i in range(info.get('deviceCount')):
             dev = self.audio.get_device_info_by_host_api_device_index(0, i)
@@ -47,7 +27,7 @@ class AnchorNode:
                 self.input_device_index = i
             if dev.get('maxOutputChannels') > 0 and self.output_device_index is None:
                 self.output_device_index = i
-        logger.info(f"Audio IO: In={self.input_device_index}, Out={self.output_device_index}")
+        logger.info(f"Audio Config: In=[{self.input_device_index}] Out=[{self.output_device_index}]")
 
     def _play_thread(self, data, delay=0):
         def task():
@@ -61,21 +41,17 @@ class AnchorNode:
                 stream.stop_stream()
                 stream.close()
             except Exception as e:
-                logger.error(f"Play error: {e}")
+                logger.error(f"Play Fail: {e}")
         threading.Thread(target=task, daemon=True).start()
 
     def measure_cycle(self):
-        # 1. 生成信号
         chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
         chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
 
-        # 2. 发送开始指令
-        if not self.net.send_cmd({"cmd": "START"}):
-            return None # 发送失败，可能断连
-
-        # 3. 录音准备 (1.2秒窗口)
-        frames = int(SAMPLE_RATE * 1.2)
-        buffer = np.zeros(frames, dtype=np.float32)
+        # 1. 启动录音 (加宽到 2.0s 以防信号丢失)
+        # 牺牲一点刷新率，换取稳定性
+        duration = 2.0 
+        frames = int(SAMPLE_RATE * duration)
         
         try:
             stream = self.audio.open(
@@ -84,10 +60,23 @@ class AnchorNode:
                 frames_per_buffer=CHUNK_SIZE
             )
             
-            # 4. 极速时序：延时 50ms 播放 A
+            # 2. 这里的顺序很重要：
+            # 先开启录音流 -> 再发指令给 Target -> 最后自己播放 A
+            # 这样能最大程度保证 Target 收到指令时，我们的 A 刚好发出去
+            
+            # 发指令告诉 Target: "马上开始，你收到后等0.1s就放音"
+            if not self.net.send_cmd({"cmd": "START"}):
+                stream.stop_stream()
+                stream.close()
+                return None
+
+            # 延迟极短时间播放 A (0.05s)
             self._play_thread(chirp_A, delay=0.05)
             
-            # 5. 读取音频
+            # 3. 阻塞读取音频
+            # 使用一次性读取大块数据的方式可能比循环 read 更稳定（如果驱动支持）
+            # 但为了兼容性，我们还是分块读
+            buffer = np.zeros(frames, dtype=np.float32)
             idx = 0
             while idx < frames:
                 data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
@@ -98,53 +87,75 @@ class AnchorNode:
             
             stream.stop_stream()
             stream.close()
+
         except Exception as e:
-            logger.error(f"Audio record failed: {e}")
+            logger.error(f"Record Error: {e}")
             return None
 
-        # 6. 等待 Target 回传结果 (超时 1秒)
-        # 参考代码逻辑：接收 JSON 数据
-        resp = self.net.recv_resp(timeout=1.0)
-        if not resp or 'delta' not in resp:
+        # 4. 接收 Target 数据 (超时 2秒)
+        resp = self.net.recv_resp(timeout=2.0)
+        if not resp:
+            print("\r [通讯丢包] 等待 Target 数据超时...", end="")
             return None
         
-        delta_B = float(resp['delta']) / SAMPLE_RATE
+        delta_B = float(resp.get('delta', 0)) / SAMPLE_RATE
 
-        # 7. 本地计算
-        t_A, _ = find_chirp_position(buffer, chirp_A, SAMPLE_RATE)
-        t_B, _ = find_chirp_position(buffer, chirp_B, SAMPLE_RATE)
+        # 5. 信号分析
+        # A (自己发的)
+        t_A, corr_A = find_chirp_position(buffer, chirp_A, SAMPLE_RATE)
+        # B (Target发的)
+        t_B, corr_B = find_chirp_position(buffer, chirp_B, SAMPLE_RATE)
         
+        # === 核心修正：严格过滤 ===
+        # 打印信号质量进度条
+        bar_A = "#" * int(corr_A * 10)
+        bar_B = "#" * int(corr_B * 10)
+        # print(f"\r [信号] A:{corr_A:.2f}[{bar_A:<10}] B:{corr_B:.2f}[{bar_B:<10}]", end="")
+
+        if corr_A < 0.3:
+            print("\r [信号弱] 没听到自己的声音 (检查麦克风)", end="")
+            return None
+            
+        if corr_B < 0.25:
+            print(f"\r [信号丢失] 没听到 Target (Corr={corr_B:.3f})   ", end="")
+            return None
+
+        # 6. 计算距离
         delta_A = t_B - t_A
-        raw_dist = calculate_distance_beepbeep(0, delta_A, 0, delta_B)
         
-        return raw_dist
+        # 只有当两个信号都清晰时才计算
+        dist = calculate_distance_beepbeep(0, delta_A, 0, delta_B)
+        
+        # 简单过滤负数或超大值
+        if dist < 0 or dist > 100:
+            return None
+            
+        return dist
 
     def run(self):
         self.net.start()
+        logger.info("Anchor Start. Waiting for connection...")
         
-        logger.info("=== Anchor Running (Smart Mode) ===")
+        # 简单的移动平均滤波器
+        history = []
         
         while True:
-            # 没连接时省电待机
             if not self.net.client_conn:
                 time.sleep(1)
                 continue
 
-            start_t = time.time()
             dist = self.measure_cycle()
-            cost = time.time() - start_t
             
             if dist is not None:
-                # 滤波处理
-                filt_dist = self.filter.update(dist)
-                fps = 1.0 / cost if cost > 0 else 0
-                print(f"\r >>> Dist: {filt_dist:.3f}m (Raw: {dist:.3f}) | FPS: {fps:.1f}", end="")
-            else:
-                # 测量失败不更新滤波器
-                pass
+                history.append(dist)
+                if len(history) > 5: history.pop(0)
+                avg_dist = np.mean(history)
+                
+                # 绿色显示成功数据
+                print(f"\r >>> 距离: {dist:.3f}m | 稳定值: {avg_dist:.3f}m        ", end="")
             
-            # 极短间隔
-            time.sleep(0.02)
+            # 间隔可以稍长一点，先确保跑通
+            time.sleep(0.1)
 
 if __name__ == "__main__":
     AnchorNode().run()

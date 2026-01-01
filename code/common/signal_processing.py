@@ -25,8 +25,8 @@ def generate_chirp(f_start, f_end, duration=0.5, sample_rate=SAMPLE_RATE,
 
 
 def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE, 
-                        first_peak_threshold=0.7):
-    """使用First Peak Detection检测信号起始位置
+                        first_peak_threshold=0.4):
+    """使用First Peak Detection检测信号起始位置（解决多径效应）
     
     Args:
         recorded_data: 录音数据
@@ -61,16 +61,13 @@ def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE,
     max_idx = np.argmax(abs_ncc)
     max_val = abs_ncc[max_idx]
     
-    # 6. First Peak Detection - 解决多径效应
+    # 6. First Peak Detection - 从前向后找第一个超过阈值的点
     threshold = max_val * first_peak_threshold
     
-    # 从最大值位置向前搜索，找第一个超过阈值的点（直射波）
-    first_peak_idx = max_idx
-    for i in range(max_idx - 1, -1, -1):
+    first_peak_idx = max_idx  # 默认值
+    for i in range(len(abs_ncc)):
         if abs_ncc[i] >= threshold:
             first_peak_idx = i
-        else:
-            # 找到第一个低于阈值的点，停止搜索
             break
     
     # 7. 抛物线插值（亚样本精度）- 对first_peak进行插值

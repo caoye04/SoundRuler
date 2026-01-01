@@ -10,10 +10,10 @@ CHANNELS = 1
 CHUNK_SIZE = 960
 
 CHIRP_DURATION = 0.5  # 从0.8改到0.5，缩短信号
-FREQ_A_START = 2000   # 保持原来的
+FREQ_A_START = 1000   # 保持原来的
 FREQ_A_END = 4000     # 保持原来的
 FREQ_B_START = 4500   # 保持原来的
-FREQ_B_END = 6500     # 保持原来的
+FREQ_B_END = 7500     # 保持原来的
 
 TOTAL_RECORD_TIME = 2.5  # 从3.0缩短到2.5
 CHIRP_B_DELAY = 1.2      

@@ -83,15 +83,15 @@ def visualize_target_audio(filepath, save_path=None):
     ax1.axvline(t_B2, color='orange', linewidth=2, linestyle='--', alpha=0.8)
     ax1.legend(loc='upper right', fontsize=9)
     
-    # ========== 2. 频谱图（时频图）==========
+    # ========== 2. 频谱图（时频图）[已修改] ==========
     ax2 = axes[1]
     
     # 计算STFT（短时傅里叶变换）
     from scipy import signal as scipy_signal
     
-    # 参数设置
-    nperseg = 2048  # 窗口大小
-    noverlap = nperseg // 2  # 重叠50%
+    # [修改点] 参数设置 - 使用更小的窗口以获得更好的视觉效果 (与Anchor一致)
+    nperseg = 256        # 窗口大小
+    noverlap = 250       # 重叠约98%
     
     frequencies, times, Sxx = scipy_signal.spectrogram(
         audio, 
@@ -105,12 +105,10 @@ def visualize_target_audio(filepath, save_path=None):
     # 转换为dB
     Sxx_dB = 10 * np.log10(Sxx + 1e-10)
     
-    # 绘制频谱图
+    # [修改点] 绘制频谱图 - 移除 vmin/vmax，使用默认缩放
     im = ax2.pcolormesh(times, frequencies, Sxx_dB, 
                         shading='gouraud', 
-                        cmap='viridis',
-                        vmin=np.percentile(Sxx_dB, 5),  # 动态范围
-                        vmax=np.percentile(Sxx_dB, 95))
+                        cmap='viridis')
     
     # 标注频段
     ax2.axhline(FREQ_A_START, color='green', linewidth=1.5, linestyle=':', alpha=0.7, label='Chirp A频段')
@@ -125,7 +123,8 @@ def visualize_target_audio(filepath, save_path=None):
     ax2.set_xlabel('时间 (秒)', fontsize=11)
     ax2.set_ylabel('频率 (Hz)', fontsize=11)
     ax2.set_title('频谱图（时频分析）', fontsize=12, fontweight='bold')
-    ax2.set_ylim(0, 8000)  # 只显示0-8kHz
+    # [修改点] 显示范围扩大到 14000Hz 以包含 Chirp B
+    ax2.set_ylim(0, 14000) 
     ax2.legend(loc='upper right', fontsize=9)
     
     # 添加颜色条

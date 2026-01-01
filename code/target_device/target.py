@@ -69,25 +69,19 @@ class TargetDevice:
             method='linear'
         )
 
-        # 等待锚节点准备信号
-        ready_msg = self.client_socket.recv(1024).decode().strip()
-        if ready_msg != "READY":
+        # 等待锚节点START信号
+        start_msg = self.client_socket.recv(1024).decode().strip()
+        if start_msg != "START":
             return "ERROR"
         
-        self.log("收到准备信号")
-        self.client_socket.sendall(b"READY\n")
+        self.log("收到START信号，立即开始")
         
-        # 等待倒计时（3秒）
-        time.sleep(3.0)
-        
-        self.log("开始测量！")
-        
-        # 准备录音缓冲区 - 使用config中的参数
+        # 准备录音缓冲区
         record_frames = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
         recorded_data = np.zeros(record_frames, dtype=np.float32)
         
         try:
-            # 打开音频流 - 使用config中的参数
+            # 打开音频流
             input_stream = self.audio.open(
                 format=pyaudio.paFloat32,
                 channels=CHANNELS,
@@ -106,7 +100,7 @@ class TargetDevice:
                 frames_per_buffer=len(chirp_B)
             )
 
-            # 同时开始录音，延迟播放 Chirp B - 使用config中的CHIRP_B_DELAY
+            # 立即开始录音，延迟播放 Chirp B
             frame_idx = 0
             chirp_B_played = False
             play_frame_target = int(SAMPLE_RATE * CHIRP_B_DELAY)
@@ -120,9 +114,9 @@ class TargetDevice:
                     
                     # 在指定时间播放 Chirp B
                     if not chirp_B_played and frame_idx >= play_frame_target:
-                        self.log(f"播放 Chirp B (延迟 {CHIRP_B_DELAY}s)")
                         output_stream.write(chirp_B.tobytes())
                         chirp_B_played = True
+                        self.log(f"播放 Chirp B (延迟 {CHIRP_B_DELAY}s)")
                     
                     frame_idx += len(chunk_data)
                 except IOError:
@@ -139,12 +133,12 @@ class TargetDevice:
 
         self.log("录音完成，分析信号...")
         
-        # 保存调试音频 - 使用signal_processing中的函数
+        # 保存调试音频
         if SAVE_AUDIO:
             timestamp = datetime.now().strftime("%H%M%S")
             save_debug_audio(recorded_data, f"target_{timestamp}.wav", SAMPLE_RATE)
         
-        # 检测信号 - 使用signal_processing中的函数
+        # 检测信号
         self.log("检测 Chirp A...")
         t_B1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
         
@@ -179,7 +173,8 @@ class TargetDevice:
                 else:
                     self.client_socket.sendall(b"ERROR\n")
                 
-                time.sleep(2)
+                # 减少等待时间，提高响应速度
+                time.sleep(0.2)
                 
         except KeyboardInterrupt:
             self.log("\n用户终止")

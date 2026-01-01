@@ -74,30 +74,13 @@ class AnchorNode:
             amplitude=0.95,
             method='linear'
         )
-
-        self.log("准备开始测量...")
         
-        # 同步：发送准备信号
-        self.client_socket.sendall(b"READY\n")
-        response = self.client_socket.recv(1024).decode().strip()
-        
-        if response != "READY":
-            self.log(f"同步失败: {response}")
-            return None
-
-        # 倒计时
-        for i in range(3, 0, -1):
-            self.log(f"倒计时: {i}")
-            time.sleep(1.0)
-        
-        self.log("开始测量！")
-        
-        # 准备录音缓冲区 - 使用config中的参数
+        # 准备录音缓冲区
         record_frames = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
         recorded_data = np.zeros(record_frames, dtype=np.float32)
         
         try:
-            # 打开音频流 - 使用config中的参数
+            # 先打开录音和播放流
             input_stream = self.audio.open(
                 format=pyaudio.paFloat32,
                 channels=CHANNELS,
@@ -116,13 +99,22 @@ class AnchorNode:
                 frames_per_buffer=len(chirp_A)
             )
 
-            # 同时开始录音和播放
-            output_stream.write(chirp_A.tobytes())
+            # 发送START信号，目标设备收到后立即开始
+            self.client_socket.sendall(b"START\n")
             
-            # 持续录音
+            # 立即开始录音，然后播放
             frame_idx = 0
+            chirp_played = False
+            
             while frame_idx < record_frames:
                 chunk_size = min(CHUNK_SIZE, record_frames - frame_idx)
+                
+                # 在第一个chunk播放chirp
+                if not chirp_played:
+                    output_stream.write(chirp_A.tobytes())
+                    chirp_played = True
+                    self.log("播放 Chirp A")
+                
                 try:
                     audio_chunk = input_stream.read(chunk_size, exception_on_overflow=False)
                     chunk_data = np.frombuffer(audio_chunk, dtype=np.float32)
@@ -142,12 +134,12 @@ class AnchorNode:
 
         self.log("录音完成，分析信号...")
         
-        # 保存调试音频 - 使用signal_processing中的函数
+        # 保存调试音频
         if SAVE_AUDIO:
             timestamp = datetime.now().strftime("%H%M%S")
             save_debug_audio(recorded_data, f"anchor_{timestamp}.wav", SAMPLE_RATE)
         
-        # 检测信号 - 使用signal_processing中的函数
+        # 检测信号
         self.log("检测 Chirp A...")
         t_A1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
         
@@ -181,7 +173,7 @@ class AnchorNode:
             delta_B_samples = float(delta_B_str)
             delta_B = delta_B_samples / SAMPLE_RATE
             
-            # 计算距离 - 使用signal_processing中的函数
+            # 计算距离
             t_B1 = 0  # 占位符，实际不使用
             t_B2 = delta_B  # 使用时间差
             distance = calculate_distance_beepbeep(t_A1, t_A2, t_B1, t_B2)
@@ -222,7 +214,8 @@ class AnchorNode:
                         self.log(f"  平均: {np.mean(recent):.3f}m")
                         self.log(f"  标准差: {np.std(recent):.3f}m")
                 
-                time.sleep(2)
+                # 减少等待时间，提高测量频率（至少1FPS）
+                time.sleep(0.2)
                 
         except KeyboardInterrupt:
             self.log("\n用户终止")

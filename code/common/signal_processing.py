@@ -25,7 +25,7 @@ def generate_chirp(f_start, f_end, duration=0.5, sample_rate=SAMPLE_RATE,
 
 
 def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE, 
-                        first_peak_threshold=0.4):
+                        first_peak_threshold=0.5):
     """使用First Peak Detection检测信号起始位置（解决多径效应）
     
     Args:

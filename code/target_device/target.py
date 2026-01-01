@@ -1,6 +1,5 @@
 """
-目标设备（设备 B）- BeepBeep 声波测距 - 简化版
-基于参考代码重构
+目标设备（设备 B）- BeepBeep 声波测距
 """
 
 import sys
@@ -51,9 +50,24 @@ class TargetDevice:
 
     def measure_distance(self):
         """执行一次测距"""
-        # 生成chirp信号
-        chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END)
-        chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END)
+        # 使用config中的参数生成chirp信号
+        chirp_A = generate_chirp(
+            FREQ_A_START, 
+            FREQ_A_END, 
+            duration=CHIRP_A_DURATION,
+            sample_rate=SAMPLE_RATE,
+            amplitude=0.95,
+            method='linear'
+        )
+
+        chirp_B = generate_chirp(
+            FREQ_B_START, 
+            FREQ_B_END, 
+            duration=CHIRP_B_DURATION,
+            sample_rate=SAMPLE_RATE,
+            amplitude=0.95,
+            method='linear'
+        )
 
         # 等待锚节点准备信号
         ready_msg = self.client_socket.recv(1024).decode().strip()
@@ -68,14 +82,15 @@ class TargetDevice:
         
         self.log("开始测量！")
         
-        # 准备录音缓冲区
+        # 准备录音缓冲区 - 使用config中的参数
         record_frames = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
         recorded_data = np.zeros(record_frames, dtype=np.float32)
         
         try:
+            # 打开音频流 - 使用config中的参数
             input_stream = self.audio.open(
                 format=pyaudio.paFloat32,
-                channels=1,
+                channels=CHANNELS,
                 rate=SAMPLE_RATE,
                 input=True,
                 input_device_index=self.input_device_index,
@@ -84,14 +99,14 @@ class TargetDevice:
             
             output_stream = self.audio.open(
                 format=pyaudio.paFloat32,
-                channels=1,
+                channels=CHANNELS,
                 rate=SAMPLE_RATE,
                 output=True,
                 output_device_index=self.output_device_index,
                 frames_per_buffer=len(chirp_B)
             )
 
-            # 🔥 关键：同时开始录音，延迟播放 Chirp B
+            # 同时开始录音，延迟播放 Chirp B - 使用config中的CHIRP_B_DELAY
             frame_idx = 0
             chirp_B_played = False
             play_frame_target = int(SAMPLE_RATE * CHIRP_B_DELAY)
@@ -124,22 +139,22 @@ class TargetDevice:
 
         self.log("录音完成，分析信号...")
         
-        # 保存调试音频
+        # 保存调试音频 - 使用signal_processing中的函数
         if SAVE_AUDIO:
             timestamp = datetime.now().strftime("%H%M%S")
-            save_debug_audio(recorded_data, f"target_{timestamp}.wav")
+            save_debug_audio(recorded_data, f"target_{timestamp}.wav", SAMPLE_RATE)
         
-        # 检测信号
+        # 检测信号 - 使用signal_processing中的函数
         self.log("检测 Chirp A...")
-        t_B1, corr_A = find_chirp_position(recorded_data, chirp_A)
+        t_B1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
         
         self.log("检测 Chirp B...")
-        t_B2, corr_B = find_chirp_position(recorded_data, chirp_B)
+        t_B2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
         
         self.log(f"✓ Chirp A: t={t_B1:.3f}s, 相关度={corr_A:.3f}")
         self.log(f"✓ Chirp B: t={t_B2:.3f}s, 相关度={corr_B:.3f}")
         
-        # 🔥 关键：发送样本数差（而非时间差）
+        # 发送样本数差（而非时间差）
         p1 = int(t_B1 * SAMPLE_RATE)
         p2 = int(t_B2 * SAMPLE_RATE)
         delta_samples = p2 - p1

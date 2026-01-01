@@ -1,6 +1,5 @@
 """
-锚节点（设备 A）- BeepBeep 声波测距 - 简化版
-基于参考代码重构
+锚节点（设备 A）- BeepBeep 声波测距
 """
 
 import sys
@@ -57,9 +56,24 @@ class AnchorNode:
 
     def measure_distance(self):
         """执行一次测距"""
-        # 生成chirp信号
-        chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END)
-        chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END)
+        # 使用config中的参数生成chirp信号
+        chirp_A = generate_chirp(
+            FREQ_A_START, 
+            FREQ_A_END, 
+            duration=CHIRP_A_DURATION,
+            sample_rate=SAMPLE_RATE,
+            amplitude=0.95,
+            method='linear'
+        )
+
+        chirp_B = generate_chirp(
+            FREQ_B_START, 
+            FREQ_B_END, 
+            duration=CHIRP_B_DURATION,
+            sample_rate=SAMPLE_RATE,
+            amplitude=0.95,
+            method='linear'
+        )
 
         self.log("准备开始测量...")
         
@@ -78,15 +92,15 @@ class AnchorNode:
         
         self.log("开始测量！")
         
-        # 准备录音缓冲区
+        # 准备录音缓冲区 - 使用config中的参数
         record_frames = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
         recorded_data = np.zeros(record_frames, dtype=np.float32)
         
         try:
-            # 打开音频流
+            # 打开音频流 - 使用config中的参数
             input_stream = self.audio.open(
                 format=pyaudio.paFloat32,
-                channels=1,
+                channels=CHANNELS,
                 rate=SAMPLE_RATE,
                 input=True,
                 input_device_index=self.input_device_index,
@@ -95,15 +109,14 @@ class AnchorNode:
             
             output_stream = self.audio.open(
                 format=pyaudio.paFloat32,
-                channels=1,
+                channels=CHANNELS,
                 rate=SAMPLE_RATE,
                 output=True,
                 output_device_index=self.output_device_index,
                 frames_per_buffer=len(chirp_A)
             )
 
-            # 🔥 关键：同时开始录音和播放
-            # 立即播放 Chirp A
+            # 同时开始录音和播放
             output_stream.write(chirp_A.tobytes())
             
             # 持续录音
@@ -129,27 +142,31 @@ class AnchorNode:
 
         self.log("录音完成，分析信号...")
         
-        # 保存调试音频
+        # 保存调试音频 - 使用signal_processing中的函数
         if SAVE_AUDIO:
             timestamp = datetime.now().strftime("%H%M%S")
-            save_debug_audio(recorded_data, f"anchor_{timestamp}.wav")
+            save_debug_audio(recorded_data, f"anchor_{timestamp}.wav", SAMPLE_RATE)
         
-        # 检测信号
+        # 检测信号 - 使用signal_processing中的函数
         self.log("检测 Chirp A...")
-        t_A1, corr_A = find_chirp_position(recorded_data, chirp_A)
+        t_A1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
         
         self.log("检测 Chirp B...")
-        t_A2, corr_B = find_chirp_position(recorded_data, chirp_B)
+        t_A2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
         
         self.log(f"✓ Chirp A: t={t_A1:.3f}s, 相关度={corr_A:.3f}")
         self.log(f"✓ Chirp B: t={t_A2:.3f}s, 相关度={corr_B:.3f}")
 
+        # 可视化（仅第一次）
         if not hasattr(self, '_visualized'):
-            from common.visualize import plot_signal_analysis, plot_correlation_analysis
-            self.log("生成信号分析图...")
-            plot_signal_analysis(recorded_data, chirp_A, chirp_B, SAMPLE_RATE)
-            plot_correlation_analysis(recorded_data, chirp_A, chirp_B, t_A1, t_A2, SAMPLE_RATE)
-            self._visualized = True
+            try:
+                from common.visualize import plot_signal_analysis, plot_correlation_analysis
+                self.log("生成信号分析图...")
+                plot_signal_analysis(recorded_data, chirp_A, chirp_B, SAMPLE_RATE)
+                plot_correlation_analysis(recorded_data, chirp_A, chirp_B, t_A1, t_A2, SAMPLE_RATE)
+                self._visualized = True
+            except ImportError:
+                self.log("可视化模块未找到，跳过")
         
         # 接收设备B的时间差
         try:
@@ -164,14 +181,10 @@ class AnchorNode:
             delta_B_samples = float(delta_B_str)
             delta_B = delta_B_samples / SAMPLE_RATE
             
-            # 计算设备A的时间差
-            delta_A = t_A2 - t_A1
-            
-            self.log(f"Δt_A = {delta_A:.6f}s")
-            self.log(f"Δt_B = {delta_B:.6f}s")
-            
-            # 计算距离
-            distance = (SOUND_SPEED / 2) * abs(delta_A - delta_B) + DEVICE_OFFSET_A + DEVICE_OFFSET_B
+            # 计算距离 - 使用signal_processing中的函数
+            t_B1 = 0  # 占位符，实际不使用
+            t_B2 = delta_B  # 使用时间差
+            distance = calculate_distance_beepbeep(t_A1, t_A2, t_B1, t_B2)
             
             self.log(f"📏 测距结果: {distance:.3f} 米")
             

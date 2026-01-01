@@ -7,18 +7,17 @@ SERVER_PORT = 20000
 # 音频配置
 SAMPLE_RATE = 48000  # 参考代码用的48kHz
 CHANNELS = 1
-CHUNK_SIZE = 4800
+CHUNK_SIZE = 960
 
-# 信号参数（对齐参考代码）
-CHIRP_DURATION = 0.8  # 0.5秒
-FREQ_A_START = 2000
-FREQ_A_END = 4000
-FREQ_B_START = 4500   # 不重叠！
-FREQ_B_END = 6500
+CHIRP_A_DURATION = 0.2  # Chirp A 信号长度
+CHIRP_B_DURATION = 0.4  # Chirp B 信号长度
+FREQ_A_START = 2000   
+FREQ_A_END = 4000     
+FREQ_B_START = 12000   
+FREQ_B_END = 14000     
 
-# 时序参数（关键改变）
-TOTAL_RECORD_TIME = 3.0     # 录音3秒
-CHIRP_B_DELAY = 1.5         # 设备B延迟1.5秒发送
+TOTAL_RECORD_TIME = 2 
+CHIRP_B_DELAY = 0.5     
 
 # 物理参数
 SOUND_SPEED = 343.0

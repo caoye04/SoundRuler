@@ -1,5 +1,5 @@
 """
-目标设备（设备 B）- BeepBeep 声波测距 (优化版)
+目标设备（设备 B）- BeepBeep 声波测距 (修复版：增加预热)
 """
 import sys
 import socket
@@ -43,13 +43,11 @@ class TargetDevice:
                 self.log(f"已连接到 {self.server_ip}")
                 break
             except:
-                self.log("连接失败，重试中...")
                 time.sleep(2)
 
     def play_sound_delayed(self, data, delay_sec):
-        """延迟并在独立线程播放"""
         def _play():
-            time.sleep(delay_sec) # 等待Anchor播放A并在空气中传播
+            time.sleep(delay_sec)
             try:
                 stream = self.audio.open(
                     format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
@@ -68,56 +66,63 @@ class TargetDevice:
 
         while True:
             try:
-                # 1. 等待开始命令
                 cmd = self.client_socket.recv(1024).decode().strip()
-                if not cmd: break # 连接断开
+                if not cmd: break
                 if cmd != "SYNC_START": continue
 
-                # 2. 立即开启录音 (先听)
-                frames_to_record = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
-                recorded_data = np.zeros(frames_to_record, dtype=np.float32)
+                # 1. 启动录音
+                warmup_frames = int(SAMPLE_RATE * 0.5) # 0.5s 预热
+                frames_to_record = int(SAMPLE_RATE * TOTAL_RECORD_TIME) + warmup_frames
+                recorded_buffer = np.zeros(frames_to_record, dtype=np.float32)
                 
                 stream = self.audio.open(
                     format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
                     input=True, input_device_index=self.input_device_index,
                     frames_per_buffer=CHUNK_SIZE
                 )
-
-                # 3. 通知Anchor "我正在听，你可以播放A了"
+                
+                # 2. 预热流：先读一点数据，确保硬件缓冲区就绪
+                # 这里我们采取“读空”或者只是简单地让stream跑一会
+                # 为了简单同步，我们直接发送 READY，但在内部处理时间轴时要注意
+                
+                # 更好的方式：让stream跑起来，发送READY，然后Anchor过一会才发声
+                # 我们已经让Anchor有 0.5s 的延迟播放了
+                
+                # 3. 通知 Anchor
                 self.client_socket.sendall(b"LISTENING\n")
 
-                # 4. 安排 Chirp B 的延迟播放 (非阻塞)
-                # 必须延迟足够久，让A先到达，但也必须在录音结束前
-                self.play_sound_delayed(chirp_B, CHIRP_B_DELAY)
+                # 4. 安排 Chirp B (在预热之后 + 额外延迟)
+                # Anchor 会在收到 LISTENING 后 0.5s 播放 A
+                # 我们需要在收到 A 之后播放 B
+                # 所以我们设置 B 的延迟为 1.0s (0.5s 等A + 0.5s 间隔)
+                self.play_sound_delayed(chirp_B, 1.0)
 
-                # 5. 录制循环
+                # 5. 录制
                 idx = 0
                 while idx < frames_to_record:
                     data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
                     decoded = np.frombuffer(data, dtype=np.float32)
                     end = min(idx + len(decoded), frames_to_record)
-                    recorded_data[idx:end] = decoded[:end-idx]
+                    recorded_buffer[idx:end] = decoded[:end-idx]
                     idx = end
                 
                 stream.stop_stream()
                 stream.close()
 
-                # 6. 分析与回传
+                # 6. 分析
                 if SAVE_AUDIO:
                     ts = datetime.now().strftime("%H%M%S")
-                    save_debug_audio(recorded_data, f"target_{ts}.wav", SAMPLE_RATE)
+                    save_debug_audio(recorded_buffer, f"target_{ts}.wav", SAMPLE_RATE)
 
-                t_B1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
-                t_B2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
-
+                t_B1, corr_A = find_chirp_position(recorded_buffer, chirp_A, SAMPLE_RATE)
+                t_B2, corr_B = find_chirp_position(recorded_buffer, chirp_B, SAMPLE_RATE)
+                
                 self.log(f"检测: A={t_B1:.4f}s, B={t_B2:.4f}s")
-
-                # 发送样本差 (t_B2 - t_B1) * Rate
+                
                 delta_samples = int((t_B2 - t_B1) * SAMPLE_RATE)
                 self.client_socket.sendall(f"{delta_samples}\n".encode())
 
             except socket.error:
-                self.log("连接断开")
                 break
             except Exception as e:
                 self.log(f"错误: {e}")

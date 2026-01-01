@@ -1,5 +1,5 @@
 """
-锚节点（设备 A）- BeepBeep 声波测距 (优化版)
+锚节点（设备 A）- BeepBeep 声波测距 (修复版：增加预热)
 """
 import sys
 import socket
@@ -42,13 +42,15 @@ class AnchorNode:
         self.server_socket.listen(1)
         self.log(f"等待连接 {SERVER_IP}:{SERVER_PORT}...")
         self.client_socket, addr = self.server_socket.accept()
-        self.client_socket.settcpkeepalive(True, 10, 5, 3) # 保持连接活跃
+        # 兼容性修复：使用 setsockopt 设置 KeepAlive
+        self.client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         self.log(f"已连接: {addr}")
 
     def play_sound_thread(self, data):
-        """独立线程播放音频，防止阻塞录音流"""
+        """独立线程播放音频"""
         def _play():
             try:
+                # 播放流也需要一点缓冲
                 stream = self.audio.open(
                     format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
                     output=True, output_device_index=self.output_device_index
@@ -61,15 +63,13 @@ class AnchorNode:
         threading.Thread(target=_play, daemon=True).start()
 
     def measure_distance(self):
-        # 1. 生成信号
         chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
         chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
 
-        # 2. 握手同步：通知Target准备
+        # 1. 握手同步
         try:
             self.client_socket.sendall(b"SYNC_START\n")
-            self.client_socket.settimeout(3.0)
-            # 等待Target回复"LISTENING"，表示它已经开始录音了
+            self.client_socket.settimeout(5.0) # 增加超时时间以容纳Target的预热
             msg = self.client_socket.recv(1024).decode().strip()
             if msg != "LISTENING":
                 self.log(f"同步失败: {msg}")
@@ -78,9 +78,13 @@ class AnchorNode:
             self.log(f"通信错误: {e}")
             return None
 
-        # 3. 启动录音 (Target已经在录了，现在我们也开始录)
+        # 2. 启动录音
         frames_to_record = int(SAMPLE_RATE * TOTAL_RECORD_TIME)
-        recorded_data = np.zeros(frames_to_record, dtype=np.float32)
+        # 增加预热帧数 (例如 0.5秒)
+        warmup_frames = int(SAMPLE_RATE * 0.5)
+        total_frames = frames_to_record + warmup_frames
+        
+        recorded_buffer = np.zeros(total_frames, dtype=np.float32)
         
         try:
             stream = self.audio.open(
@@ -89,25 +93,37 @@ class AnchorNode:
                 frames_per_buffer=CHUNK_SIZE
             )
             
-            # 4. 立即播放 Chirp A (非阻塞)
-            self.play_sound_thread(chirp_A)
+            # 3. 【关键修复】先读取 0.5s 数据进行预热，确保流稳定
+            # 但为了保持时间轴连续，我们把这部分数据也存下来，或者直接丢弃但注意播放时机
+            # 策略：一直录，但在第 0.5s 时刻才播放
+            
+            # 4. 开启播放线程 (延迟 0.5s 播放，模拟预热)
+            def delayed_play():
+                time.sleep(0.5) 
+                self.play_sound_thread(chirp_A)
+            threading.Thread(target=delayed_play, daemon=True).start()
             
             # 5. 录制循环
             idx = 0
-            while idx < frames_to_record:
+            while idx < total_frames:
                 data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
                 decoded = np.frombuffer(data, dtype=np.float32)
-                end = min(idx + len(decoded), frames_to_record)
-                recorded_data[idx:end] = decoded[:end-idx]
+                end = min(idx + len(decoded), total_frames)
+                recorded_buffer[idx:end] = decoded[:end-idx]
                 idx = end
 
             stream.stop_stream()
             stream.close()
+            
+            # 6. 截取有效数据（去掉前面的不稳定可能更好，或者直接用全段）
+            # 这里直接使用全段数据，因为chirp_A是在0.5s处播放的，肯定在buffer里
+            recorded_data = recorded_buffer
+
         except Exception as e:
             self.log(f"录音硬件错误: {e}")
             return None
 
-        # 6. 处理信号
+        # 7. 信号处理
         if SAVE_AUDIO:
             ts = datetime.now().strftime("%H%M%S")
             save_debug_audio(recorded_data, f"anchor_{ts}.wav", SAMPLE_RATE)
@@ -115,21 +131,19 @@ class AnchorNode:
         t_A1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
         t_A2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
         
-        self.log(f"检测: A={t_A1:.4f}s ({corr_A:.2f}), B={t_A2:.4f}s ({corr_B:.2f})")
-
-        # 7. 获取Target数据
+        self.log(f"检测: A={t_A1:.4f}s, B={t_A2:.4f}s")
+        
+        # 8. 接收 Target 数据
         try:
-            self.client_socket.settimeout(3.0)
-            resp = self.client_socket.recv(1024).decode().strip()
-            if resp.startswith("ERROR") or not resp:
-                return None
-            
-            delta_samples = float(resp)
+            msg = self.client_socket.recv(1024).decode().strip()
+            if not msg or msg.startswith("ERROR"): return None
+            delta_samples = float(msg)
             delta_B = delta_samples / SAMPLE_RATE
             
-            # 这里的BeepBeep公式: Distance = v/2 * |(t_A2 - t_A1) - (t_B2 - t_B1)|
             delta_A = t_A2 - t_A1
-            distance = calculate_distance_beepbeep(0, delta_A, 0, delta_B) # 适配你的函数接口
+            
+            # BeepBeep 核心公式
+            distance = calculate_distance_beepbeep(0, delta_A, 0, delta_B)
             return distance
         except Exception as e:
             self.log(f"数据接收错误: {e}")
@@ -148,12 +162,10 @@ class AnchorNode:
                     print(f" >>> 距离: {dist:.3f}m | (均值: {avg:.3f}m)")
                 else:
                     print(" x 测量失败")
-                
-                time.sleep(0.5) # 极短间隔，提高刷新率
+                time.sleep(1) # 稍作休息
         except KeyboardInterrupt:
             self.log("停止")
-            self.client_socket.close()
-            self.server_socket.close()
+            if self.client_socket: self.client_socket.close()
             self.audio.terminate()
 
 if __name__ == "__main__":

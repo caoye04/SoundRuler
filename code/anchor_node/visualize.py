@@ -48,9 +48,9 @@ def visualize_anchor_audio(filepath, save_path=None):
     
     # 都用linear方法
     chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, 
-                            duration=0.5, amplitude=0.95, method='linear')
+                        duration=CHIRP_A_DURATION, amplitude=0.95, method='linear')
     chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, 
-                            duration=0.5, amplitude=0.95, method='linear')
+                            duration=CHIRP_B_DURATION, amplitude=0.95, method='linear')
     
     # 检测chirp位置
     t_A, corr_A = find_chirp_position(audio, chirp_A, sample_rate)

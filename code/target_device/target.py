@@ -54,7 +54,7 @@ class TargetDevice:
         chirp_A = generate_chirp(
             FREQ_A_START, 
             FREQ_A_END, 
-            duration=CHIRP_DURATION,
+            duration=CHIRP_A_DURATION,
             sample_rate=SAMPLE_RATE,
             amplitude=0.95,
             method='linear'
@@ -63,10 +63,10 @@ class TargetDevice:
         chirp_B = generate_chirp(
             FREQ_B_START, 
             FREQ_B_END, 
-            duration=CHIRP_DURATION,
+            duration=CHIRP_B_DURATION,
             sample_rate=SAMPLE_RATE,
             amplitude=0.95,
-            method='logarithmic'
+            method='linear'
         )
 
         # 等待锚节点准备信号

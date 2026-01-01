@@ -56,7 +56,8 @@ def visualize_anchor_audio(filepath, save_path=None):
     t_A, corr_A = find_chirp_position(audio, chirp_A, sample_rate)
     t_B, corr_B = find_chirp_position(audio, chirp_B, sample_rate)
     
-    chirp_duration = len(chirp_A) / sample_rate
+    chirp_A_duration = len(chirp_A) / sample_rate
+    chirp_B_duration = len(chirp_B) / sample_rate
     
     print(f"  Chirp A: 时间={t_A:.3f}s, 相关度={corr_A:.3f}")
     print(f"  Chirp B: 时间={t_B:.3f}s, 相关度={corr_B:.3f}")
@@ -76,8 +77,8 @@ def visualize_anchor_audio(filepath, save_path=None):
     ax1.set_xlim(0, duration)
     
     # 标注检测到的Chirp位置
-    ax1.axvspan(t_A, t_A + chirp_duration, alpha=0.3, color='green', label=f'Chirp A (相关度={corr_A:.2f})')
-    ax1.axvspan(t_B, t_B + chirp_duration, alpha=0.3, color='orange', label=f'Chirp B (相关度={corr_B:.2f})')
+    ax1.axvspan(t_A, t_A + chirp_A_duration, alpha=0.3, color='green', label=f'Chirp A (相关度={corr_A:.2f})')
+    ax1.axvspan(t_B, t_B + chirp_B_duration, alpha=0.3, color='orange', label=f'Chirp B (相关度={corr_B:.2f})')
     ax1.axvline(t_A, color='green', linewidth=2, linestyle='--', alpha=0.8)
     ax1.axvline(t_B, color='orange', linewidth=2, linestyle='--', alpha=0.8)
     ax1.legend(loc='upper right', fontsize=9)
@@ -163,7 +164,7 @@ def visualize_anchor_audio(filepath, save_path=None):
     # 以检测到的位置为中心，前后各0.3秒
     margin = 0.3
     start_time = max(0, t_A - margin)
-    end_time = min(duration, t_A + chirp_duration + margin)
+    end_time = min(duration, t_A + chirp_A_duration + margin)
     start_idx = int(start_time * sample_rate)
     end_idx = int(end_time * sample_rate)
     
@@ -171,7 +172,7 @@ def visualize_anchor_audio(filepath, save_path=None):
     local_time = time_axis[start_idx:end_idx]
     
     ax4.plot(local_time, local_audio, linewidth=0.8, color='green', alpha=0.8)
-    ax4.axvspan(t_A, t_A + chirp_duration, alpha=0.3, color='green')
+    ax4.axvspan(t_A, t_A + chirp_A_duration, alpha=0.3, color='green')
     ax4.axvline(t_A, color='darkgreen', linewidth=2, linestyle='--', label=f'检测位置: {t_A:.3f}s')
     ax4.set_xlabel('时间 (秒)', fontsize=11)
     ax4.set_ylabel('幅度', fontsize=11)
@@ -184,7 +185,7 @@ def visualize_anchor_audio(filepath, save_path=None):
     
     # 以检测到的位置为中心，前后各0.3秒
     start_time = max(0, t_B - margin)
-    end_time = min(duration, t_B + chirp_duration + margin)
+    end_time = min(duration, t_B + chirp_B_duration + margin)
     start_idx = int(start_time * sample_rate)
     end_idx = int(end_time * sample_rate)
     
@@ -192,7 +193,7 @@ def visualize_anchor_audio(filepath, save_path=None):
     local_time = time_axis[start_idx:end_idx]
     
     ax5.plot(local_time, local_audio, linewidth=0.8, color='orange', alpha=0.8)
-    ax5.axvspan(t_B, t_B + chirp_duration, alpha=0.3, color='orange')
+    ax5.axvspan(t_B, t_B + chirp_B_duration, alpha=0.3, color='orange')
     ax5.axvline(t_B, color='darkorange', linewidth=2, linestyle='--', label=f'检测位置: {t_B:.3f}s')
     ax5.set_xlabel('时间 (秒)', fontsize=11)
     ax5.set_ylabel('幅度', fontsize=11)

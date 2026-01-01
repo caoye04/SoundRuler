@@ -1,6 +1,6 @@
 """
-声波录音可视化分析工具 - Target端
-用于分析录音质量、定位Chirp A信号位置、验证Chirp B播放时机
+声波录音可视化分析工具 - Target端（增强版，含频谱图）
+用于分析录音质量、定位Chirp信号位置、验证Chirp B播放时机
 """
 
 import numpy as np
@@ -62,8 +62,8 @@ def visualize_target_audio(filepath, save_path=None):
     print(f"  Chirp B: 时间={t_B2:.3f}s, 相关度={corr_B:.3f}")
     print(f"  时间差: Δt = {t_B2 - t_B1:.3f}s")
     
-    # 创建图形
-    fig, axes = plt.subplots(4, 1, figsize=(16, 12))
+    # 创建图形 - 5个子图
+    fig, axes = plt.subplots(5, 1, figsize=(16, 16))
     fig.suptitle(f'Target录音分析: {os.path.basename(filepath)}', fontsize=14, fontweight='bold')
     
     # ========== 1. 完整时域波形 ==========
@@ -82,8 +82,57 @@ def visualize_target_audio(filepath, save_path=None):
     ax1.axvline(t_B2, color='orange', linewidth=2, linestyle='--', alpha=0.8)
     ax1.legend(loc='upper right', fontsize=9)
     
-    # ========== 2. 能量包络 ==========
+    # ========== 2. 频谱图（时频图）==========
     ax2 = axes[1]
+    
+    # 计算STFT（短时傅里叶变换）
+    from scipy import signal as scipy_signal
+    
+    # 参数设置
+    nperseg = 2048  # 窗口大小
+    noverlap = nperseg // 2  # 重叠50%
+    
+    frequencies, times, Sxx = scipy_signal.spectrogram(
+        audio, 
+        fs=sample_rate,
+        window='hann',
+        nperseg=nperseg,
+        noverlap=noverlap,
+        scaling='density'
+    )
+    
+    # 转换为dB
+    Sxx_dB = 10 * np.log10(Sxx + 1e-10)
+    
+    # 绘制频谱图
+    im = ax2.pcolormesh(times, frequencies, Sxx_dB, 
+                        shading='gouraud', 
+                        cmap='viridis',
+                        vmin=np.percentile(Sxx_dB, 5),  # 动态范围
+                        vmax=np.percentile(Sxx_dB, 95))
+    
+    # 标注频段
+    ax2.axhline(FREQ_A_START, color='green', linewidth=1.5, linestyle=':', alpha=0.7, label='Chirp A频段')
+    ax2.axhline(FREQ_A_END, color='green', linewidth=1.5, linestyle=':', alpha=0.7)
+    ax2.axhline(FREQ_B_START, color='orange', linewidth=1.5, linestyle=':', alpha=0.7, label='Chirp B频段')
+    ax2.axhline(FREQ_B_END, color='orange', linewidth=1.5, linestyle=':', alpha=0.7)
+    
+    # 标注时间位置
+    ax2.axvline(t_B1, color='green', linewidth=2, linestyle='--', alpha=0.8)
+    ax2.axvline(t_B2, color='orange', linewidth=2, linestyle='--', alpha=0.8)
+    
+    ax2.set_xlabel('时间 (秒)', fontsize=11)
+    ax2.set_ylabel('频率 (Hz)', fontsize=11)
+    ax2.set_title('频谱图（时频分析）', fontsize=12, fontweight='bold')
+    ax2.set_ylim(0, 8000)  # 只显示0-8kHz
+    ax2.legend(loc='upper right', fontsize=9)
+    
+    # 添加颜色条
+    cbar = plt.colorbar(im, ax=ax2)
+    cbar.set_label('功率谱密度 (dB)', fontsize=10)
+    
+    # ========== 3. 能量包络 ==========
+    ax3 = axes[2]
     
     # 计算短时能量（窗口100ms）
     window_size = int(0.1 * sample_rate)
@@ -96,20 +145,20 @@ def visualize_target_audio(filepath, save_path=None):
         energy.append(np.sqrt(np.mean(window**2)))  # RMS能量
         energy_time.append(i / sample_rate)
     
-    ax2.plot(energy_time, energy, linewidth=2, color='red')
-    ax2.set_xlabel('时间 (秒)', fontsize=11)
-    ax2.set_ylabel('RMS能量', fontsize=11)
-    ax2.set_title('短时能量包络 (100ms窗口)', fontsize=12, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(0, duration)
+    ax3.plot(energy_time, energy, linewidth=2, color='red')
+    ax3.set_xlabel('时间 (秒)', fontsize=11)
+    ax3.set_ylabel('RMS能量', fontsize=11)
+    ax3.set_title('短时能量包络 (100ms窗口)', fontsize=12, fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim(0, duration)
     
     # 标注chirp位置
-    ax2.axvline(t_B1, color='green', linewidth=2, linestyle='--', alpha=0.8, label='Chirp A')
-    ax2.axvline(t_B2, color='orange', linewidth=2, linestyle='--', alpha=0.8, label='Chirp B')
-    ax2.legend(loc='upper right', fontsize=9)
+    ax3.axvline(t_B1, color='green', linewidth=2, linestyle='--', alpha=0.8, label='Chirp A')
+    ax3.axvline(t_B2, color='orange', linewidth=2, linestyle='--', alpha=0.8, label='Chirp B')
+    ax3.legend(loc='upper right', fontsize=9)
     
-    # ========== 3. 局部放大：Chirp A 区域 ==========
-    ax3 = axes[2]
+    # ========== 4. 局部放大：Chirp A 区域 ==========
+    ax4 = axes[3]
     
     # 以检测到的位置为中心，前后各0.3秒
     margin = 0.3
@@ -121,17 +170,17 @@ def visualize_target_audio(filepath, save_path=None):
     local_audio = audio[start_idx:end_idx]
     local_time = time_axis[start_idx:end_idx]
     
-    ax3.plot(local_time, local_audio, linewidth=0.8, color='green', alpha=0.8)
-    ax3.axvspan(t_B1, t_B1 + chirp_duration, alpha=0.3, color='green')
-    ax3.axvline(t_B1, color='darkgreen', linewidth=2, linestyle='--', label=f'检测位置: {t_B1:.3f}s')
-    ax3.set_xlabel('时间 (秒)', fontsize=11)
-    ax3.set_ylabel('幅度', fontsize=11)
-    ax3.set_title(f'局部放大: Chirp A (相关度={corr_A:.3f})', fontsize=12, fontweight='bold')
-    ax3.grid(True, alpha=0.3)
-    ax3.legend(loc='upper right', fontsize=9)
+    ax4.plot(local_time, local_audio, linewidth=0.8, color='green', alpha=0.8)
+    ax4.axvspan(t_B1, t_B1 + chirp_duration, alpha=0.3, color='green')
+    ax4.axvline(t_B1, color='darkgreen', linewidth=2, linestyle='--', label=f'检测位置: {t_B1:.3f}s')
+    ax4.set_xlabel('时间 (秒)', fontsize=11)
+    ax4.set_ylabel('幅度', fontsize=11)
+    ax4.set_title(f'局部放大: Chirp A (相关度={corr_A:.3f})', fontsize=12, fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.legend(loc='upper right', fontsize=9)
     
-    # ========== 4. 局部放大：Chirp B 区域 ==========
-    ax4 = axes[3]
+    # ========== 5. 局部放大：Chirp B 区域 ==========
+    ax5 = axes[4]
     
     # 以检测到的位置为中心，前后各0.3秒
     start_time = max(0, t_B2 - margin)
@@ -142,14 +191,14 @@ def visualize_target_audio(filepath, save_path=None):
     local_audio = audio[start_idx:end_idx]
     local_time = time_axis[start_idx:end_idx]
     
-    ax4.plot(local_time, local_audio, linewidth=0.8, color='orange', alpha=0.8)
-    ax4.axvspan(t_B2, t_B2 + chirp_duration, alpha=0.3, color='orange')
-    ax4.axvline(t_B2, color='darkorange', linewidth=2, linestyle='--', label=f'检测位置: {t_B2:.3f}s')
-    ax4.set_xlabel('时间 (秒)', fontsize=11)
-    ax4.set_ylabel('幅度', fontsize=11)
-    ax4.set_title(f'局部放大: Chirp B (相关度={corr_B:.3f})', fontsize=12, fontweight='bold')
-    ax4.grid(True, alpha=0.3)
-    ax4.legend(loc='upper right', fontsize=9)
+    ax5.plot(local_time, local_audio, linewidth=0.8, color='orange', alpha=0.8)
+    ax5.axvspan(t_B2, t_B2 + chirp_duration, alpha=0.3, color='orange')
+    ax5.axvline(t_B2, color='darkorange', linewidth=2, linestyle='--', label=f'检测位置: {t_B2:.3f}s')
+    ax5.set_xlabel('时间 (秒)', fontsize=11)
+    ax5.set_ylabel('幅度', fontsize=11)
+    ax5.set_title(f'局部放大: Chirp B (相关度={corr_B:.3f})', fontsize=12, fontweight='bold')
+    ax5.grid(True, alpha=0.3)
+    ax5.legend(loc='upper right', fontsize=9)
     
     # ========== 统计信息 ==========
     print("\n" + "="*60)

@@ -74,7 +74,12 @@ class TargetDevice:
         if start_msg != "START":
             return "ERROR"
         
-        self.log("收到START信号，立即开始")
+        self.log("收到START信号")
+        
+        # 小延迟，让锚节点先稳定播放（网络延迟+音频启动时间）
+        time.sleep(0.05)
+        
+        self.log("开始录音")
         
         # 准备录音缓冲区
         record_frames = int(SAMPLE_RATE * TOTAL_RECORD_TIME)

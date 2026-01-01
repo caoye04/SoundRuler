@@ -102,15 +102,16 @@ class AnchorNode:
             # 发送START信号，目标设备收到后立即开始
             self.client_socket.sendall(b"START\n")
             
-            # 立即开始录音，然后播放
+            # 开始录音，延迟一点再播放，确保目标设备准备好
             frame_idx = 0
             chirp_played = False
+            play_delay_frames = int(SAMPLE_RATE * 0.1)  # 延迟100ms播放
             
             while frame_idx < record_frames:
                 chunk_size = min(CHUNK_SIZE, record_frames - frame_idx)
                 
-                # 在第一个chunk播放chirp
-                if not chirp_played:
+                # 延迟后播放chirp
+                if not chirp_played and frame_idx >= play_delay_frames:
                     output_stream.write(chirp_A.tobytes())
                     chirp_played = True
                     self.log("播放 Chirp A")
@@ -149,7 +150,6 @@ class AnchorNode:
         self.log(f"✓ Chirp A: t={t_A1:.3f}s, 相关度={corr_A:.3f}")
         self.log(f"✓ Chirp B: t={t_A2:.3f}s, 相关度={corr_B:.3f}")
 
-        
         # 接收设备B的时间差
         try:
             self.client_socket.settimeout(5.0)

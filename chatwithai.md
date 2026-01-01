@@ -1,10 +1,8 @@
 我正在完成我的物联网大作业——声波测距程序。
 
-下面是我的作业要求和目前代码，
+下面是我的作业要求和目前代码。我现在希望做一些以下改动：
 
-我需要绘制两个端的可视化界面来完成可视化要求。请你根据我的代码情况，帮我适当的绘制两个html来显示我的可视化方案。
-
-我对可视化的要求是：显示出基本信息和一些分析信息；不要有ai味；整体美观简洁；可以模仿apple风格的那种圆角黑白之类的设计
+可以看出来我的代码是一打开并连接上就会自动开始测距与记录。我希望在anchor前端界面做三个控制按钮：开始测距、停止测距、停止并清空
 
 请你帮我提供新的代码！
 
@@ -69,6 +67,8 @@ d）测距刷新率：测试系统每秒有效输出测距结果的次数，要�
 ```cmd
 SoundRuler/code/
 ├── anchor_node/
+│   ├── debug_audio/    # 录音文件     
+│   ├── debug_png/      # 针对录音文件的分析图片   
 │   ├── dashboard.html  # 锚节点的前端网页界面
 │   ├── anchor.py       # 锚节点主程序
 │   └── visualize.py    # 对应音频分析程序
@@ -77,6 +77,8 @@ SoundRuler/code/
 │   ├── net_transport.py    # 网络传输相关
 │   └── signal_processing.py # 信号处理
 ├── target_device/
+│   ├── debug_audio/     # 录音文件     
+│   ├── debug_png/       # 针对录音文件的分析图片 
 │   ├── dashboard.html   # 目标设备的前端网页界面
 │   ├── target.py        # 目标设备主程序
 │   └── visualize.py     # 对应音频分析程序
@@ -92,7 +94,9 @@ import threading
 import pyaudio
 import numpy as np
 import datetime
-from flask import Flask, jsonify, send_from_directory
+import os
+import subprocess
+from flask import Flask, jsonify, send_from_directory, request, send_file, abort
 from flask_cors import CORS
 
 sys.path.append("..")
@@ -103,7 +107,7 @@ from common.net_transport import AnchorServer, logger
 # === 调试配置 ===
 SAVE_AUDIO = True
 DISTANCE_OFFSET = 0.0
-WEB_PORT = 8080  # Web界面端口
+WEB_PORT = 8080
 
 # === Flask 应用 ===
 app = Flask(__name__, static_folder='.')
@@ -127,7 +131,7 @@ class AnchorState:
         self.fps = 0.0
         self._timestamps = []
     
-    def update(self, raw_dist, median_dist, corr_A, corr_B, t_A, t_B, history):
+    def update(self, raw_dist, median_dist, corr_A, corr_B, t_A, t_B, history, audio_file=None):
         with self._lock:
             self.raw_distance = raw_dist
             self.distance = median_dist
@@ -139,12 +143,18 @@ class AnchorState:
             self.measure_count += 1
             self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
             
-            # 更新历史记录
+            # 更新历史记录 - 增加保存数量，添加音频文件名
             self.history.insert(0, {
                 "time": self.last_update,
-                "distance": round(median_dist, 3)
+                "distance": round(median_dist, 3),
+                "raw_distance": round(raw_dist, 3),
+                "corr_A": round(corr_A, 3),
+                "corr_B": round(corr_B, 3),
+                "t_A": round(t_A, 4),
+                "t_B": round(t_B, 4),
+                "audio_file": audio_file  # 新增：关联的音频文件名
             })
-            if len(self.history) > 10:
+            if len(self.history) > 100:
                 self.history.pop()
             
             # 计算FPS
@@ -171,12 +181,11 @@ class AnchorState:
                 "measure_count": self.measure_count,
                 "fps": round(self.fps, 1),
                 "last_update": self.last_update,
-                "history": self.history[:5]
+                "history": self.history
             }
 
 state = AnchorState()
 
-# === Flask 路由 ===
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -184,6 +193,61 @@ def index():
 @app.route('/api/status')
 def get_status():
     return jsonify(state.get_state())
+
+@app.route('/api/audio/<filename>')
+def get_audio(filename):
+    """提供音频文件下载/播放"""
+    audio_path = os.path.join('debug_audio', filename)
+    if os.path.exists(audio_path):
+        return send_file(audio_path, mimetype='audio/wav')
+    else:
+        abort(404, description="Audio file not found")
+
+@app.route('/api/analysis/<filename>')
+def get_analysis(filename):
+    """获取或生成分析图像"""
+    # 从音频文件名生成对应的PNG文件名
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    audio_path = os.path.join('debug_audio', filename)
+    
+    # 检查音频文件是否存在
+    if not os.path.exists(audio_path):
+        abort(404, description="Audio file not found")
+    
+    # 如果PNG不存在，调用visualize生成
+    if not os.path.exists(png_path):
+        try:
+            # 确保输出目录存在
+            os.makedirs('debug_png', exist_ok=True)
+            
+            # 调用visualize模块进行分析
+            from visualize import visualize_anchor_audio
+            import matplotlib
+            matplotlib.use('Agg')  # 使用非交互式后端
+            import matplotlib.pyplot as plt
+            
+            visualize_anchor_audio(audio_path, png_path)
+            plt.close('all')
+            
+        except Exception as e:
+            logger.error(f"Analysis generation failed: {e}")
+            abort(500, description=f"Failed to generate analysis: {str(e)}")
+    
+    if os.path.exists(png_path):
+        return send_file(png_path, mimetype='image/png')
+    else:
+        abort(500, description="Failed to generate analysis image")
+
+@app.route('/api/check_analysis/<filename>')
+def check_analysis(filename):
+    """检查分析图像是否存在"""
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    return jsonify({
+        "exists": os.path.exists(png_path),
+        "png_filename": png_filename
+    })
 
 def run_web_server():
     app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
@@ -202,6 +266,7 @@ class AnchorNode:
         self.chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
         
         self.history = []
+        self.last_audio_file = None  # 记录最后保存的音频文件名
 
         logger.info("正在初始化音频流 (Long-lived Streams)...")
         self.stream_out = self.audio.open(
@@ -261,8 +326,10 @@ class AnchorNode:
         ts = datetime.datetime.now().strftime("%H%M%S")
         
         if not resp:
-            if SAVE_AUDIO: save_debug_audio(full_buffer, f"{ts}_NoResp.wav")
-            return None, None, None, None, None
+            audio_file = f"{ts}_NoResp.wav"
+            if SAVE_AUDIO: save_debug_audio(full_buffer, audio_file)
+            self.last_audio_file = audio_file
+            return None, None, None, None, None, audio_file
         
         delta_B = float(resp.get('delta', 0)) / SAMPLE_RATE
         
@@ -271,20 +338,23 @@ class AnchorNode:
         
         if corr_A < 0.3 or corr_B < 0.3:
             print(f"\r [信号差] A:{corr_A:.2f} B:{corr_B:.2f}", end="")
-            if SAVE_AUDIO: save_debug_audio(full_buffer, f"{ts}_BadSignal.wav")
-            return None, corr_A, corr_B, t_A, t_B
+            audio_file = f"{ts}_BadSignal.wav"
+            if SAVE_AUDIO: save_debug_audio(full_buffer, audio_file)
+            self.last_audio_file = audio_file
+            return None, corr_A, corr_B, t_A, t_B, audio_file
 
         delta_A = t_B - t_A
         time_diff = delta_A - delta_B
         raw_dist = (time_diff * 343.0) / 2.0
         
+        audio_file = f"{ts}_OK_{raw_dist:.1f}m.wav"
         if SAVE_AUDIO: 
-             save_debug_audio(full_buffer, f"{ts}_OK_{raw_dist:.1f}m.wav")
+             save_debug_audio(full_buffer, audio_file)
+        self.last_audio_file = audio_file
 
-        return raw_dist, corr_A, corr_B, t_A, t_B
+        return raw_dist, corr_A, corr_B, t_A, t_B, audio_file
 
     def run(self):
-        # 启动Web服务器线程
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
@@ -302,7 +372,10 @@ class AnchorNode:
 
             try:
                 result = self.measure_cycle()
-                raw, corr_A, corr_B, t_A, t_B = result if result else (None, 0, 0, 0, 0)
+                if result is None:
+                    continue
+                    
+                raw, corr_A, corr_B, t_A, t_B, audio_file = result
                 
                 if raw is not None:
                     real_dist = raw - DISTANCE_OFFSET
@@ -310,8 +383,16 @@ class AnchorNode:
                     if len(self.history) > 5: self.history.pop(0)
                     median_dist = np.median(self.history)
                     
-                    # 更新全局状态
-                    state.update(raw, median_dist, corr_A, corr_B, t_A, t_B, self.history)
+                    # 更新全局状态，传入音频文件名
+                    state.update(raw, median_dist, corr_A, corr_B, t_A, t_B, self.history, audio_file)
+                    
+                    # 将距离发送给Target
+                    self.net.send_cmd({
+                        "cmd": "DISTANCE",
+                        "distance": round(float(median_dist), 3),
+                        "raw_distance": round(float(raw), 3),
+                        "time": state.last_update
+                    })
                     
                     status = "✅" if abs(median_dist) < 50 else "❌"
                     print(f"\r {status} 稳定测量: {median_dist:.3f}m (原始: {raw:.2f}m) | 抖动: {np.std(self.history):.2f}", end="")
@@ -326,11 +407,14 @@ class AnchorNode:
             time.sleep(0.1)
     
     def __del__(self):
-        self.stream_out.stop_stream()
-        self.stream_out.close()
-        self.stream_in.stop_stream()
-        self.stream_in.close()
-        self.audio.terminate()
+        try:
+            self.stream_out.stop_stream()
+            self.stream_out.close()
+            self.stream_in.stop_stream()
+            self.stream_in.close()
+            self.audio.terminate()
+        except:
+            pass
 
 if __name__ == "__main__":
     AnchorNode().run()
@@ -345,6 +429,7 @@ if __name__ == "__main__":
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>锚节点 · SoundRuler</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         * {
             margin: 0;
@@ -374,7 +459,7 @@ if __name__ == "__main__":
         }
 
         .container {
-            max-width: 720px;
+            max-width: 800px;
             margin: 0 auto;
         }
 
@@ -503,6 +588,14 @@ if __name__ == "__main__":
             font-variant-numeric: tabular-nums;
         }
 
+        /* 图表容器 */
+        .chart-container {
+            position: relative;
+            height: 280px;
+            width: 100%;
+            margin-top: 8px;
+        }
+
         .metrics-row {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -576,6 +669,31 @@ if __name__ == "__main__":
             font-variant-numeric: tabular-nums;
         }
 
+        /* 可滚动日志容器 */
+        .log-container {
+            max-height: 250px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+
+        .log-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .log-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .log-container::-webkit-scrollbar-thumb {
+            background-color: var(--border);
+            border-radius: 3px;
+        }
+
+        .log-container::-webkit-scrollbar-thumb:hover {
+            background-color: var(--text-secondary);
+        }
+
         .history-list {
             display: flex;
             flex-direction: column;
@@ -590,6 +708,12 @@ if __name__ == "__main__":
             background: var(--bg);
             border-radius: 8px;
             font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .history-item:hover {
+            background: #e8e8ed;
         }
 
         .history-time {
@@ -601,6 +725,9 @@ if __name__ == "__main__":
             font-weight: 500;
             font-variant-numeric: tabular-nums;
         }
+
+        .history-value.good { color: var(--success); }
+        .history-value.warning { color: var(--warning); }
 
         .empty-state {
             text-align: center;
@@ -614,6 +741,218 @@ if __name__ == "__main__":
             margin-top: 32px;
             font-size: 11px;
             color: var(--text-secondary);
+        }
+
+        /* 两列布局 */
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        @media (max-width: 700px) {
+            .two-col {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ========== 悬浮提示框样式 ========== */
+        .tooltip {
+            position: absolute;
+            background: var(--card);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            z-index: 1000;
+            min-width: 220px;
+            pointer-events: auto;
+            border: 1px solid var(--border);
+        }
+
+        .tooltip-header {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tooltip-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+
+        .tooltip-label {
+            color: var(--text-secondary);
+        }
+
+        .tooltip-value {
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .tooltip-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .tooltip-btn {
+            flex: 1;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tooltip-btn.primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .tooltip-btn.primary:hover {
+            background: #0066d6;
+        }
+
+        .tooltip-btn.secondary {
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .tooltip-btn.secondary:hover {
+            background: #e0e0e5;
+        }
+
+        .tooltip-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* ========== 模态框样式 ========== */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s;
+        }
+
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal {
+            background: var(--card);
+            border-radius: 16px;
+            max-width: 90vw;
+            max-height: 90vh;
+            overflow: hidden;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            transform: scale(0.9);
+            transition: transform 0.3s;
+        }
+
+        .modal-overlay.active .modal {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .modal-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: var(--bg);
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            background: #e0e0e5;
+            color: var(--text);
+        }
+
+        .modal-body {
+            padding: 24px;
+            overflow: auto;
+            max-height: calc(90vh - 80px);
+        }
+
+        .modal-body img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+        }
+
+        .modal-loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* 音频指示器 */
+        .audio-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 8px;
+            color: var(--accent);
+            font-size: 11px;
+        }
+
+        .audio-indicator svg {
+            width: 14px;
+            height: 14px;
         }
     </style>
 </head>
@@ -648,60 +987,367 @@ if __name__ == "__main__":
             </div>
         </div>
 
+        <!-- 距离折线图 -->
         <div class="card">
-            <div class="card-title" style="margin-bottom:16px;">信号质量</div>
-            <div class="metrics-row">
-                <div class="metric-box">
-                    <div class="metric-label">Chirp A 相关度</div>
-                    <div class="metric-value" id="corrA">--</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="corrABar" style="width:0%"></div>
+            <div class="card-header">
+                <span class="card-title">距离变化曲线</span>
+                <span class="card-badge" id="chartPoints">0 点</span>
+            </div>
+            <div class="chart-container">
+                <canvas id="distanceChart"></canvas>
+            </div>
+        </div>
+
+        <div class="two-col">
+            <div class="card">
+                <div class="card-title" style="margin-bottom:16px;">信号质量</div>
+                <div class="metrics-row">
+                    <div class="metric-box">
+                        <div class="metric-label">Chirp A 相关度</div>
+                        <div class="metric-value" id="corrA">--</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="corrABar" style="width:0%"></div>
+                        </div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Chirp B 相关度</div>
+                        <div class="metric-value" id="corrB">--</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="corrBBar" style="width:0%"></div>
+                        </div>
                     </div>
                 </div>
-                <div class="metric-box">
-                    <div class="metric-label">Chirp B 相关度</div>
-                    <div class="metric-value" id="corrB">--</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="corrBBar" style="width:0%"></div>
+            </div>
+
+            <div class="card">
+                <div class="card-title" style="margin-bottom:16px;">统计数据</div>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">抖动</div>
+                        <div class="stat-value" id="jitter">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">测量次数</div>
+                        <div class="stat-value" id="count">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">刷新率</div>
+                        <div class="stat-value" id="fps">-- Hz</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Δt</div>
+                        <div class="stat-value" id="deltaT">--</div>
                     </div>
                 </div>
             </div>
         </div>
 
+        <!-- 历史记录 -->
         <div class="card">
-            <div class="card-title" style="margin-bottom:16px;">统计数据</div>
-            <div class="stats-grid">
-                <div class="stat-item">
-                    <div class="stat-label">抖动</div>
-                    <div class="stat-value" id="jitter">--</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">测量次数</div>
-                    <div class="stat-value" id="count">0</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">刷新率</div>
-                    <div class="stat-value" id="fps">-- Hz</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Δt</div>
-                    <div class="stat-value" id="deltaT">--</div>
-                </div>
+            <div class="card-header">
+                <span class="card-title">历史记录</span>
+                <span class="card-badge" id="historyCount">0 条</span>
             </div>
-        </div>
-
-        <div class="card">
-            <div class="card-title" style="margin-bottom:16px;">历史记录</div>
-            <div class="history-list" id="historyList">
-                <div class="empty-state">暂无数据</div>
+            <div class="log-container" id="logContainer">
+                <div class="history-list" id="historyList">
+                    <div class="empty-state">暂无数据</div>
+                </div>
             </div>
         </div>
 
         <footer>SoundRuler · BeepBeep Protocol</footer>
     </div>
 
+    <!-- 悬浮提示框 -->
+    <div class="tooltip" id="tooltip" style="display: none;">
+        <div class="tooltip-header" id="tooltipHeader">数据点详情</div>
+        <div id="tooltipContent"></div>
+        <div class="tooltip-buttons">
+            <button class="tooltip-btn secondary" id="btnPlayAudio">
+                <span>▶ 播放音频</span>
+            </button>
+            <button class="tooltip-btn primary" id="btnShowAnalysis">
+                <span>📊 分析图像</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- 分析图像模态框 -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-title" id="modalTitle">音频分析</span>
+                <button class="modal-close" id="modalClose">×</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在生成分析图像...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 隐藏的音频播放器 -->
+    <audio id="audioPlayer" style="display: none;"></audio>
+
     <script>
         const API_URL = '/api/status';
+        const MAX_CHART_POINTS = 50;
+
+        // 图表数据
+        let chartLabels = [];
+        let chartData = [];
+        let chartHistory = [];  // 存储完整的历史数据用于tooltip
+
+        // 当前选中的数据点
+        let selectedPoint = null;
+        let currentAudioFile = null;
+
+        // DOM元素
+        const tooltip = document.getElementById('tooltip');
+        const modalOverlay = document.getElementById('modalOverlay');
+        const modalBody = document.getElementById('modalBody');
+        const modalTitle = document.getElementById('modalTitle');
+        const audioPlayer = document.getElementById('audioPlayer');
+
+        // 初始化图表
+        const ctx = document.getElementById('distanceChart').getContext('2d');
+        const distanceChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: chartLabels,
+                datasets: [{
+                    label: '距离 (m)',
+                    data: chartData,
+                    borderColor: '#007aff',
+                    backgroundColor: 'rgba(0, 122, 255, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 5,
+                    pointBackgroundColor: '#007aff',
+                    pointBorderColor: '#fff',
+                    pointBorderWidth: 2,
+                    pointHoverRadius: 8,
+                    pointHoverBackgroundColor: '#007aff',
+                    pointHoverBorderColor: '#fff',
+                    pointHoverBorderWidth: 3
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: {
+                    duration: 300
+                },
+                interaction: {
+                    intersect: true,
+                    mode: 'nearest'
+                },
+                onClick: (event, elements) => {
+                    if (elements.length > 0) {
+                        const index = elements[0].index;
+                        showTooltip(index, event);
+                    }
+                },
+                onHover: (event, elements) => {
+                    event.native.target.style.cursor = elements.length > 0 ? 'pointer' : 'default';
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        enabled: true,
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        titleFont: { size: 12 },
+                        bodyFont: { size: 12 },
+                        padding: 10,
+                        cornerRadius: 8,
+                        displayColors: false,
+                        callbacks: {
+                            title: function(context) {
+                                return '点击查看详情';
+                            },
+                            label: function(context) {
+                                return `距离: ${context.parsed.y.toFixed(3)} m`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        grid: {
+                            display: false
+                        },
+                        ticks: {
+                            maxTicksLimit: 8,
+                            font: { size: 10 },
+                            color: '#86868b'
+                        }
+                    },
+                    y: {
+                        display: true,
+                        grid: {
+                            color: 'rgba(0, 0, 0, 0.05)'
+                        },
+                        ticks: {
+                            font: { size: 10 },
+                            color: '#86868b',
+                            callback: function(value) {
+                                return value.toFixed(2) + 'm';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let lastMeasureCount = 0;
+
+        function showTooltip(index, event) {
+            const data = chartHistory[index];
+            if (!data) return;
+
+            selectedPoint = data;
+            currentAudioFile = data.audio_file;
+
+            // 更新tooltip内容
+            document.getElementById('tooltipHeader').textContent = `测量 @ ${data.time}`;
+            document.getElementById('tooltipContent').innerHTML = `
+                <div class="tooltip-row">
+                    <span class="tooltip-label">距离</span>
+                    <span class="tooltip-value">${data.distance.toFixed(3)} m</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">原始距离</span>
+                    <span class="tooltip-value">${data.raw_distance ? data.raw_distance.toFixed(3) : '--'} m</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">Chirp A 相关度</span>
+                    <span class="tooltip-value">${data.corr_A ? data.corr_A.toFixed(3) : '--'}</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">Chirp B 相关度</span>
+                    <span class="tooltip-value">${data.corr_B ? data.corr_B.toFixed(3) : '--'}</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">音频文件</span>
+                    <span class="tooltip-value">${data.audio_file || '无'}</span>
+                </div>
+            `;
+
+            // 设置按钮状态
+            const btnPlay = document.getElementById('btnPlayAudio');
+            const btnAnalysis = document.getElementById('btnShowAnalysis');
+            
+            if (data.audio_file) {
+                btnPlay.disabled = false;
+                btnAnalysis.disabled = false;
+            } else {
+                btnPlay.disabled = true;
+                btnAnalysis.disabled = true;
+            }
+
+            // 定位tooltip
+            const chartRect = document.getElementById('distanceChart').getBoundingClientRect();
+            const x = event.native.clientX;
+            const y = event.native.clientY;
+
+            tooltip.style.display = 'block';
+            tooltip.style.left = `${x + 15}px`;
+            tooltip.style.top = `${y - 10}px`;
+
+            // 确保tooltip不超出屏幕
+            const tooltipRect = tooltip.getBoundingClientRect();
+            if (tooltipRect.right > window.innerWidth) {
+                tooltip.style.left = `${x - tooltipRect.width - 15}px`;
+            }
+            if (tooltipRect.bottom > window.innerHeight) {
+                tooltip.style.top = `${y - tooltipRect.height + 10}px`;
+            }
+        }
+
+        function hideTooltip() {
+            tooltip.style.display = 'none';
+            selectedPoint = null;
+        }
+
+        // 点击页面其他区域隐藏tooltip
+        document.addEventListener('click', (e) => {
+            if (!tooltip.contains(e.target) && e.target.id !== 'distanceChart') {
+                hideTooltip();
+            }
+        });
+
+        // 播放音频按钮
+        document.getElementById('btnPlayAudio').addEventListener('click', () => {
+            if (currentAudioFile) {
+                audioPlayer.src = `/api/audio/${currentAudioFile}`;
+                audioPlayer.play();
+            }
+        });
+
+        // 显示分析图像按钮
+        document.getElementById('btnShowAnalysis').addEventListener('click', async () => {
+            if (!currentAudioFile) return;
+
+            // 显示模态框
+            modalOverlay.classList.add('active');
+            modalTitle.textContent = `音频分析 - ${currentAudioFile}`;
+            modalBody.innerHTML = `
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在生成分析图像...</span>
+                </div>
+            `;
+
+            try {
+                // 请求分析图像（会自动生成如果不存在）
+                const response = await fetch(`/api/analysis/${currentAudioFile}`);
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const imageUrl = URL.createObjectURL(blob);
+                    modalBody.innerHTML = `<img src="${imageUrl}" alt="音频分析图像">`;
+                } else {
+                    const error = await response.json();
+                    modalBody.innerHTML = `
+                        <div class="modal-loading">
+                            <span style="color: var(--error);">生成失败: ${error.description || '未知错误'}</span>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                modalBody.innerHTML = `
+                    <div class="modal-loading">
+                        <span style="color: var(--error);">请求失败: ${e.message}</span>
+                    </div>
+                `;
+            }
+
+            hideTooltip();
+        });
+
+        // 关闭模态框
+        document.getElementById('modalClose').addEventListener('click', () => {
+            modalOverlay.classList.remove('active');
+        });
+
+        modalOverlay.addEventListener('click', (e) => {
+            if (e.target === modalOverlay) {
+                modalOverlay.classList.remove('active');
+            }
+        });
+
+        // ESC键关闭
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                modalOverlay.classList.remove('active');
+                hideTooltip();
+            }
+        });
 
         function updateUI(data) {
             // 连接状态
@@ -732,16 +1378,86 @@ if __name__ == "__main__":
             document.getElementById('fps').textContent = data.fps.toFixed(1) + ' Hz';
             document.getElementById('deltaT').textContent = (data.t_B - data.t_A).toFixed(3) + 's';
 
-            // 历史
+            // 更新图表（仅当有新数据时）
+            if (data.measure_count > lastMeasureCount && data.distance !== null) {
+                lastMeasureCount = data.measure_count;
+                
+                // 从history获取最新的数据点
+                const latestData = data.history[0];
+                
+                // 添加新数据点
+                chartLabels.push(data.last_update);
+                chartData.push(data.distance);
+                chartHistory.push(latestData);
+                
+                // 限制数据点数量
+                if (chartLabels.length > MAX_CHART_POINTS) {
+                    chartLabels.shift();
+                    chartData.shift();
+                    chartHistory.shift();
+                }
+                
+                distanceChart.update('none');
+                document.getElementById('chartPoints').textContent = chartData.length + ' 点';
+            }
+
+            // 历史记录（带音频标记）
             const histList = document.getElementById('historyList');
             if (data.history && data.history.length > 0) {
-                histList.innerHTML = data.history.map(h => `
-                    <div class="history-item">
-                        <span class="history-time">${h.time}</span>
-                        <span class="history-value">${h.distance.toFixed(3)} m</span>
-                    </div>
-                `).join('');
+                histList.innerHTML = data.history.map((h, idx) => {
+                    const valueClass = h.distance < 10 ? 'good' : (h.distance < 50 ? '' : 'warning');
+                    const audioIcon = h.audio_file ? `
+                        <span class="audio-indicator" title="有音频记录">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 3v18l-7-5.5V8.5L12 3zm1 0v18l7-5.5V8.5L13 3z"/>
+                            </svg>
+                        </span>
+                    ` : '';
+                    return `
+                        <div class="history-item" data-index="${idx}" onclick="showHistoryDetail(${idx})">
+                            <span class="history-time">${h.time}${audioIcon}</span>
+                            <span class="history-value ${valueClass}">${h.distance.toFixed(3)} m</span>
+                        </div>
+                    `;
+                }).join('');
+                document.getElementById('historyCount').textContent = data.history.length + ' 条';
             }
+        }
+
+        // 点击历史记录项显示详情
+        let historyData = [];
+        function showHistoryDetail(index) {
+            const data = historyData[index];
+            if (!data || !data.audio_file) return;
+
+            currentAudioFile = data.audio_file;
+            
+            // 显示模态框
+            modalOverlay.classList.add('active');
+            modalTitle.textContent = `音频分析 - ${data.audio_file}`;
+            modalBody.innerHTML = `
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在加载分析图像...</span>
+                </div>
+            `;
+
+            fetch(`/api/analysis/${data.audio_file}`)
+                .then(response => {
+                    if (response.ok) return response.blob();
+                    throw new Error('加载失败');
+                })
+                .then(blob => {
+                    const imageUrl = URL.createObjectURL(blob);
+                    modalBody.innerHTML = `<img src="${imageUrl}" alt="音频分析图像">`;
+                })
+                .catch(e => {
+                    modalBody.innerHTML = `
+                        <div class="modal-loading">
+                            <span style="color: var(--error);">加载失败: ${e.message}</span>
+                        </div>
+                    `;
+                });
         }
 
         function setCorrelation(valId, barId, val) {
@@ -767,6 +1483,7 @@ if __name__ == "__main__":
             try {
                 const resp = await fetch(API_URL);
                 const data = await resp.json();
+                historyData = data.history || [];  // 保存历史数据供详情使用
                 updateUI(data);
             } catch (e) {
                 console.error('Fetch error:', e);
@@ -1072,7 +1789,8 @@ import threading
 import pyaudio
 import numpy as np
 import datetime
-from flask import Flask, jsonify, send_from_directory
+import os
+from flask import Flask, jsonify, send_from_directory, send_file, abort
 from flask_cors import CORS
 
 sys.path.append("..")
@@ -1080,13 +1798,11 @@ from common.config import *
 from common.signal_processing import *
 from common.net_transport import TargetClient, logger
 
-WEB_PORT = 8081  # Target端Web界面端口
+WEB_PORT = 8081
 
-# === Flask 应用 ===
 app = Flask(__name__, static_folder='.')
 CORS(app)
 
-# === 全局状态 ===
 class TargetState:
     def __init__(self):
         self._lock = threading.Lock()
@@ -1102,8 +1818,12 @@ class TargetState:
         self.measure_count = 0
         self.last_update = None
         self.logs = []
+        # 新增：距离数据
+        self.distance = None
+        self.raw_distance = None
+        self.distance_history = []
     
-    def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples):
+    def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples, audio_file=None):
         with self._lock:
             self.corr_A = corr_A
             self.corr_B = corr_B
@@ -1113,20 +1833,53 @@ class TargetState:
             self.delta_time = t_B - t_A
             self.measure_count += 1
             self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            # 记录日志，包含音频文件信息
+            log_entry = {
+                "time": self.last_update,
+                "level": "OK",
+                "msg": f"测量完成 ΔT={t_B-t_A:.3f}s",
+                "audio_file": audio_file
+            }
+            self.logs.insert(0, log_entry)
+            if len(self.logs) > 100:
+                self.logs.pop()
+    
+    def update_distance(self, distance, raw_distance, time_str):
+        """更新来自Anchor的距离数据"""
+        with self._lock:
+            self.distance = distance
+            self.raw_distance = raw_distance
+            self.last_update = time_str
+            
+            # 更新历史记录
+            self.distance_history.insert(0, {
+                "time": time_str,
+                "distance": distance,
+                "raw_distance": raw_distance,
+                "corr_A": self.corr_A,
+                "corr_B": self.corr_B,
+                "t_A": self.t_A,
+                "t_B": self.t_B,
+                "audio_file": self.logs[0].get("audio_file") if self.logs else None
+            })
+            if len(self.distance_history) > 100:
+                self.distance_history.pop()
     
     def set_connected(self, status, ip=""):
         with self._lock:
             self.connected = status
             self.server_ip = ip
     
-    def add_log(self, level, msg):
+    def add_log(self, level, msg, audio_file=None):
         with self._lock:
             self.logs.insert(0, {
                 "time": datetime.datetime.now().strftime("%H:%M:%S"),
                 "level": level,
-                "msg": msg
+                "msg": msg,
+                "audio_file": audio_file
             })
-            if len(self.logs) > 20:
+            if len(self.logs) > 100:
                 self.logs.pop()
     
     def get_state(self):
@@ -1143,12 +1896,14 @@ class TargetState:
                 "delta_time": round(self.delta_time, 4),
                 "measure_count": self.measure_count,
                 "last_update": self.last_update,
-                "logs": self.logs[:10]
+                "logs": self.logs,
+                "distance": round(self.distance, 3) if self.distance is not None else None,
+                "raw_distance": round(self.raw_distance, 3) if self.raw_distance is not None else None,
+                "distance_history": self.distance_history
             }
 
 state = TargetState()
 
-# === Flask 路由 ===
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -1156,6 +1911,56 @@ def index():
 @app.route('/api/status')
 def get_status():
     return jsonify(state.get_state())
+
+@app.route('/api/audio/<filename>')
+def get_audio(filename):
+    """提供音频文件下载/播放"""
+    audio_path = os.path.join('debug_audio', filename)
+    if os.path.exists(audio_path):
+        return send_file(audio_path, mimetype='audio/wav')
+    else:
+        abort(404, description="Audio file not found")
+
+@app.route('/api/analysis/<filename>')
+def get_analysis(filename):
+    """获取或生成分析图像"""
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    audio_path = os.path.join('debug_audio', filename)
+    
+    if not os.path.exists(audio_path):
+        abort(404, description="Audio file not found")
+    
+    if not os.path.exists(png_path):
+        try:
+            os.makedirs('debug_png', exist_ok=True)
+            
+            from visualize import visualize_target_audio
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            visualize_target_audio(audio_path, png_path)
+            plt.close('all')
+            
+        except Exception as e:
+            logger.error(f"Analysis generation failed: {e}")
+            abort(500, description=f"Failed to generate analysis: {str(e)}")
+    
+    if os.path.exists(png_path):
+        return send_file(png_path, mimetype='image/png')
+    else:
+        abort(500, description="Failed to generate analysis image")
+
+@app.route('/api/check_analysis/<filename>')
+def check_analysis(filename):
+    """检查分析图像是否存在"""
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    return jsonify({
+        "exists": os.path.exists(png_path),
+        "png_filename": png_filename
+    })
 
 def run_web_server():
     app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
@@ -1168,6 +1973,7 @@ class TargetDevice:
         self.net = TargetClient()
         self.input_device_index = None
         self.output_device_index = None
+        self.last_audio_file = None
         
         self._find_devices()
         
@@ -1224,7 +2030,21 @@ class TargetDevice:
         
         while True:
             msg = self.net.recv_cmd()
-            if not msg or msg.get('cmd') != 'START': 
+            if not msg:
+                continue
+            
+            cmd = msg.get('cmd')
+            
+            # 处理距离更新消息
+            if cmd == 'DISTANCE':
+                distance = msg.get('distance')
+                raw_distance = msg.get('raw_distance')
+                time_str = msg.get('time', datetime.datetime.now().strftime("%H:%M:%S"))
+                state.update_distance(distance, raw_distance, time_str)
+                state.add_log("OK", f"距离更新: {distance:.3f}m")
+                continue
+            
+            if cmd != 'START': 
                 continue
 
             state.add_log("INFO", "收到 START 指令")
@@ -1250,9 +2070,14 @@ class TargetDevice:
                 
                 delta_samples = int((t_B - t_A) * SAMPLE_RATE)
                 
-                # 更新全局状态
-                state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples)
-                state.add_log("OK", f"测量完成 ΔT={t_B-t_A:.3f}s")
+                # 保存音频文件
+                ts = datetime.datetime.now().strftime("%H%M%S")
+                audio_file = f"target_{ts}.wav"
+                if SAVE_AUDIO:
+                    save_debug_audio(full_buffer, audio_file)
+                self.last_audio_file = audio_file
+                
+                state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples, audio_file)
                 
                 logger.info(f"Process: A={corr_A:.2f}@t={t_A:.3f}s | B={corr_B:.2f}@t={t_B:.3f}s")
                 
@@ -1271,7 +2096,6 @@ class TargetDevice:
                 except: pass
 
     def run(self):
-        # 启动Web服务器
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
@@ -1314,6 +2138,7 @@ if __name__ == "__main__":
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>目标设备 · SoundRuler</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         * {
             margin: 0;
@@ -1343,7 +2168,7 @@ if __name__ == "__main__":
         }
 
         .container {
-            max-width: 720px;
+            max-width: 800px;
             margin: 0 auto;
         }
 
@@ -1424,6 +2249,54 @@ if __name__ == "__main__":
             color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 0.5px;
+        }
+
+        .card-badge {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            background: #e8f5e9;
+            color: var(--success);
+            font-weight: 500;
+        }
+
+        /* 距离显示 */
+        .distance-display {
+            text-align: center;
+            padding: 16px 0;
+        }
+
+        .distance-value {
+            font-size: 56px;
+            font-weight: 600;
+            letter-spacing: -2px;
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .distance-value.placeholder {
+            color: var(--text-secondary);
+        }
+
+        .distance-unit {
+            font-size: 18px;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-left: 2px;
+        }
+
+        .distance-note {
+            margin-top: 10px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        /* 图表容器 */
+        .chart-container {
+            position: relative;
+            height: 250px;
+            width: 100%;
+            margin-top: 8px;
         }
 
         .activity-indicator {
@@ -1507,12 +2380,35 @@ if __name__ == "__main__":
             font-variant-numeric: tabular-nums;
         }
 
+        /* 可滚动日志容器 */
+        .log-scroll-container {
+            max-height: 300px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+
+        .log-scroll-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .log-scroll-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .log-scroll-container::-webkit-scrollbar-thumb {
+            background-color: var(--border);
+            border-radius: 3px;
+        }
+
+        .log-scroll-container::-webkit-scrollbar-thumb:hover {
+            background-color: var(--text-secondary);
+        }
+
         .log-container {
             background: var(--bg);
             border-radius: 10px;
             padding: 12px 14px;
-            max-height: 180px;
-            overflow-y: auto;
             font-size: 12px;
         }
 
@@ -1521,6 +2417,18 @@ if __name__ == "__main__":
             gap: 8px;
             padding: 4px 0;
             font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+            cursor: pointer;
+            transition: background 0.2s;
+            padding: 6px 4px;
+            border-radius: 4px;
+        }
+
+        .log-line:hover {
+            background: rgba(0,0,0,0.05);
+        }
+
+        .log-line.has-audio {
+            cursor: pointer;
         }
 
         .log-time {
@@ -1540,6 +2448,12 @@ if __name__ == "__main__":
 
         .log-msg {
             color: var(--text);
+            flex: 1;
+        }
+
+        .log-audio-icon {
+            color: var(--accent);
+            margin-left: auto;
         }
 
         .empty-state {
@@ -1554,6 +2468,203 @@ if __name__ == "__main__":
             margin-top: 32px;
             font-size: 11px;
             color: var(--text-secondary);
+        }
+
+        /* 两列布局 */
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        @media (max-width: 700px) {
+            .two-col {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ========== 悬浮提示框样式 ========== */
+        .tooltip {
+            position: absolute;
+            background: var(--card);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            z-index: 1000;
+            min-width: 220px;
+            pointer-events: auto;
+            border: 1px solid var(--border);
+        }
+
+        .tooltip-header {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tooltip-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+
+        .tooltip-label {
+            color: var(--text-secondary);
+        }
+
+        .tooltip-value {
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .tooltip-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .tooltip-btn {
+            flex: 1;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tooltip-btn.primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .tooltip-btn.primary:hover {
+            background: #0066d6;
+        }
+
+        .tooltip-btn.secondary {
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .tooltip-btn.secondary:hover {
+            background: #e0e0e5;
+        }
+
+        .tooltip-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* ========== 模态框样式 ========== */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s;
+        }
+
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal {
+            background: var(--card);
+            border-radius: 16px;
+            max-width: 90vw;
+            max-height: 90vh;
+            overflow: hidden;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            transform: scale(0.9);
+            transition: transform 0.3s;
+        }
+
+        .modal-overlay.active .modal {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .modal-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: var(--bg);
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            background: #e0e0e5;
+            color: var(--text);
+        }
+
+        .modal-body {
+            padding: 24px;
+            overflow: auto;
+            max-height: calc(90vh - 80px);
+        }
+
+        .modal-body img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+        }
+
+        .modal-loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
     </style>
 </head>
@@ -1572,62 +2683,401 @@ if __name__ == "__main__":
             <div class="status-item" id="serverInfo">--</div>
         </div>
 
+        <!-- 距离显示 -->
         <div class="card">
             <div class="card-header">
-                <span class="card-title">信号检测</span>
-                <div class="activity-indicator" id="activity" style="display:none;">
-                    <span class="activity-dot"></span>
-                    <span>测量中</span>
+                <span class="card-title">测距结果</span>
+                <span class="card-badge" id="updateBadge">--</span>
+            </div>
+            <div class="distance-display">
+                <span class="distance-value placeholder" id="distanceValue">--</span>
+                <span class="distance-unit">m</span>
+                <div class="distance-note">数据来自锚节点</div>
+            </div>
+        </div>
+
+        <!-- 距离折线图 -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">距离变化曲线</span>
+                <span class="card-badge" id="chartPoints">0 点</span>
+            </div>
+            <div class="chart-container">
+                <canvas id="distanceChart"></canvas>
+            </div>
+        </div>
+
+        <div class="two-col">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">信号检测</span>
+                    <div class="activity-indicator" id="activity" style="display:none;">
+                        <span class="activity-dot"></span>
+                        <span>测量中</span>
+                    </div>
+                </div>
+                <div class="signal-grid">
+                    <div class="signal-box">
+                        <div class="signal-name">Chirp A (接收)</div>
+                        <div class="signal-corr" id="corrA">--</div>
+                        <div class="signal-time">t = <span id="timeA">--</span> s</div>
+                    </div>
+                    <div class="signal-box">
+                        <div class="signal-name">Chirp B (发送)</div>
+                        <div class="signal-corr" id="corrB">--</div>
+                        <div class="signal-time">t = <span id="timeB">--</span> s</div>
+                    </div>
                 </div>
             </div>
-            <div class="signal-grid">
-                <div class="signal-box">
-                    <div class="signal-name">Chirp A (接收)</div>
-                    <div class="signal-corr" id="corrA">--</div>
-                    <div class="signal-time">t = <span id="timeA">--</span> s</div>
-                </div>
-                <div class="signal-box">
-                    <div class="signal-name">Chirp B (发送)</div>
-                    <div class="signal-corr" id="corrB">--</div>
-                    <div class="signal-time">t = <span id="timeB">--</span> s</div>
+
+            <div class="card">
+                <div class="card-title" style="margin-bottom:12px;">分析数据</div>
+                <div class="data-list">
+                    <div class="data-row">
+                        <span class="data-label">时间差 Δt (B - A)</span>
+                        <span class="data-value" id="deltaTime">-- s</span>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">样本差 Δ samples</span>
+                        <span class="data-value" id="deltaSamples">--</span>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">测量次数</span>
+                        <span class="data-value" id="count">0</span>
+                    </div>
                 </div>
             </div>
         </div>
 
+        <!-- 运行日志 -->
         <div class="card">
-            <div class="card-title" style="margin-bottom:12px;">分析数据</div>
-            <div class="data-list">
-                <div class="data-row">
-                    <span class="data-label">时间差 Δt (B - A)</span>
-                    <span class="data-value" id="deltaTime">-- s</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">样本差 Δ samples</span>
-                    <span class="data-value" id="deltaSamples">--</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">测量次数</span>
-                    <span class="data-value" id="count">0</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">最后更新</span>
-                    <span class="data-value" id="lastUpdate">--</span>
-                </div>
+            <div class="card-header">
+                <span class="card-title">运行日志</span>
+                <span class="card-badge" id="logCount">0 条</span>
             </div>
-        </div>
-
-        <div class="card">
-            <div class="card-title" style="margin-bottom:12px;">运行日志</div>
-            <div class="log-container" id="logContainer">
-                <div class="empty-state">等待数据...</div>
+            <div class="log-scroll-container">
+                <div class="log-container" id="logContainer">
+                    <div class="empty-state">等待数据...</div>
+                </div>
             </div>
         </div>
 
         <footer>SoundRuler · BeepBeep Protocol</footer>
     </div>
 
+    <!-- 悬浮提示框 -->
+    <div class="tooltip" id="tooltip" style="display: none;">
+        <div class="tooltip-header" id="tooltipHeader">数据点详情</div>
+        <div id="tooltipContent"></div>
+        <div class="tooltip-buttons">
+            <button class="tooltip-btn secondary" id="btnPlayAudio">
+                <span>▶ 播放音频</span>
+            </button>
+            <button class="tooltip-btn primary" id="btnShowAnalysis">
+                <span>📊 分析图像</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- 分析图像模态框 -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-title" id="modalTitle">音频分析</span>
+                <button class="modal-close" id="modalClose">×</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在生成分析图像...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 隐藏的音频播放器 -->
+    <audio id="audioPlayer" style="display: none;"></audio>
+
     <script>
         const API_URL = '/api/status';
+        const MAX_CHART_POINTS = 50;
+
+        // 图表数据
+        let chartLabels = [];
+        let chartData = [];
+        let chartHistory = [];
+
+        // 当前选中的数据点
+        let selectedPoint = null;
+        let currentAudioFile = null;
+
+        // DOM元素
+        const tooltip = document.getElementById('tooltip');
+        const modalOverlay = document.getElementById('modalOverlay');
+        const modalBody = document.getElementById('modalBody');
+        const modalTitle = document.getElementById('modalTitle');
+        const audioPlayer = document.getElementById('audioPlayer');
+
+        // 初始化图表
+        const ctx = document.getElementById('distanceChart').getContext('2d');
+        const distanceChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: chartLabels,
+                datasets: [{
+                    label: '距离 (m)',
+                    data: chartData,
+                    borderColor: '#007aff',
+                    backgroundColor: 'rgba(0, 122, 255, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 5,
+                    pointBackgroundColor: '#007aff',
+                    pointBorderColor: '#fff',
+                    pointBorderWidth: 2,
+                    pointHoverRadius: 8,
+                    pointHoverBackgroundColor: '#007aff',
+                    pointHoverBorderColor: '#fff',
+                    pointHoverBorderWidth: 3
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: {
+                    duration: 300
+                },
+                interaction: {
+                    intersect: true,
+                    mode: 'nearest'
+                },
+                onClick: (event, elements) => {
+                    if (elements.length > 0) {
+                        const index = elements[0].index;
+                        showTooltip(index, event);
+                    }
+                },
+                onHover: (event, elements) => {
+                    event.native.target.style.cursor = elements.length > 0 ? 'pointer' : 'default';
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        enabled: true,
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        titleFont: { size: 12 },
+                        bodyFont: { size: 12 },
+                        padding: 10,
+                        cornerRadius: 8,
+                        displayColors: false,
+                        callbacks: {
+                            title: function(context) {
+                                return '点击查看详情';
+                            },
+                            label: function(context) {
+                                return `距离: ${context.parsed.y.toFixed(3)} m`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        grid: {
+                            display: false
+                        },
+                        ticks: {
+                            maxTicksLimit: 8,
+                            font: { size: 10 },
+                            color: '#86868b'
+                        }
+                    },
+                    y: {
+                        display: true,
+                        grid: {
+                            color: 'rgba(0, 0, 0, 0.05)'
+                        },
+                        ticks: {
+                            font: { size: 10 },
+                            color: '#86868b',
+                            callback: function(value) {
+                                return value.toFixed(2) + 'm';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let lastMeasureCount = 0;
+
+        function showTooltip(index, event) {
+            const data = chartHistory[index];
+            if (!data) return;
+
+            selectedPoint = data;
+            currentAudioFile = data.audio_file;
+
+            document.getElementById('tooltipHeader').textContent = `测量 @ ${data.time}`;
+            document.getElementById('tooltipContent').innerHTML = `
+                <div class="tooltip-row">
+                    <span class="tooltip-label">距离</span>
+                    <span class="tooltip-value">${data.distance.toFixed(3)} m</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">原始距离</span>
+                    <span class="tooltip-value">${data.raw_distance ? data.raw_distance.toFixed(3) : '--'} m</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">Chirp A 相关度</span>
+                    <span class="tooltip-value">${data.corr_A ? data.corr_A.toFixed(3) : '--'}</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">Chirp B 相关度</span>
+                    <span class="tooltip-value">${data.corr_B ? data.corr_B.toFixed(3) : '--'}</span>
+                </div>
+                <div class="tooltip-row">
+                    <span class="tooltip-label">音频文件</span>
+                    <span class="tooltip-value">${data.audio_file || '无'}</span>
+                </div>
+            `;
+
+            const btnPlay = document.getElementById('btnPlayAudio');
+            const btnAnalysis = document.getElementById('btnShowAnalysis');
+            
+            if (data.audio_file) {
+                btnPlay.disabled = false;
+                btnAnalysis.disabled = false;
+            } else {
+                btnPlay.disabled = true;
+                btnAnalysis.disabled = true;
+            }
+
+            const x = event.native.clientX;
+            const y = event.native.clientY;
+
+            tooltip.style.display = 'block';
+            tooltip.style.left = `${x + 15}px`;
+            tooltip.style.top = `${y - 10}px`;
+
+            const tooltipRect = tooltip.getBoundingClientRect();
+            if (tooltipRect.right > window.innerWidth) {
+                tooltip.style.left = `${x - tooltipRect.width - 15}px`;
+            }
+            if (tooltipRect.bottom > window.innerHeight) {
+                tooltip.style.top = `${y - tooltipRect.height + 10}px`;
+            }
+        }
+
+        function hideTooltip() {
+            tooltip.style.display = 'none';
+            selectedPoint = null;
+        }
+
+        document.addEventListener('click', (e) => {
+            if (!tooltip.contains(e.target) && e.target.id !== 'distanceChart') {
+                hideTooltip();
+            }
+        });
+
+        document.getElementById('btnPlayAudio').addEventListener('click', () => {
+            if (currentAudioFile) {
+                audioPlayer.src = `/api/audio/${currentAudioFile}`;
+                audioPlayer.play();
+            }
+        });
+
+        document.getElementById('btnShowAnalysis').addEventListener('click', async () => {
+            if (!currentAudioFile) return;
+
+            modalOverlay.classList.add('active');
+            modalTitle.textContent = `音频分析 - ${currentAudioFile}`;
+            modalBody.innerHTML = `
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在生成分析图像...</span>
+                </div>
+            `;
+
+            try {
+                const response = await fetch(`/api/analysis/${currentAudioFile}`);
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const imageUrl = URL.createObjectURL(blob);
+                    modalBody.innerHTML = `<img src="${imageUrl}" alt="音频分析图像">`;
+                } else {
+                    const error = await response.json();
+                    modalBody.innerHTML = `
+                        <div class="modal-loading">
+                            <span style="color: var(--error);">生成失败: ${error.description || '未知错误'}</span>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                modalBody.innerHTML = `
+                    <div class="modal-loading">
+                        <span style="color: var(--error);">请求失败: ${e.message}</span>
+                    </div>
+                `;
+            }
+
+            hideTooltip();
+        });
+
+        document.getElementById('modalClose').addEventListener('click', () => {
+            modalOverlay.classList.remove('active');
+        });
+
+        modalOverlay.addEventListener('click', (e) => {
+            if (e.target === modalOverlay) {
+                modalOverlay.classList.remove('active');
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                modalOverlay.classList.remove('active');
+                hideTooltip();
+            }
+        });
+
+        // 全局存储日志数据供点击使用
+        let logsData = [];
+
+        function showLogAnalysis(index) {
+            const log = logsData[index];
+            if (!log || !log.audio_file) return;
+
+            currentAudioFile = log.audio_file;
+            modalOverlay.classList.add('active');
+            modalTitle.textContent = `音频分析 - ${log.audio_file}`;
+            modalBody.innerHTML = `
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>正在加载分析图像...</span>
+                </div>
+            `;
+
+            fetch(`/api/analysis/${log.audio_file}`)
+                .then(response => {
+                    if (response.ok) return response.blob();
+                    throw new Error('加载失败');
+                })
+                .then(blob => {
+                    const imageUrl = URL.createObjectURL(blob);
+                    modalBody.innerHTML = `<img src="${imageUrl}" alt="音频分析图像">`;
+                })
+                .catch(e => {
+                    modalBody.innerHTML = `
+                        <div class="modal-loading">
+                            <span style="color: var(--error);">加载失败: ${e.message}</span>
+                        </div>
+                    `;
+                });
+        }
 
         function updateUI(data) {
             // 连接状态
@@ -1637,8 +3087,18 @@ if __name__ == "__main__":
             text.textContent = data.connected ? '已连接锚节点' : '等待连接';
             document.getElementById('serverInfo').textContent = data.server_ip || '--';
 
-            // 活动指示器
             document.getElementById('activity').style.display = data.connected ? 'flex' : 'none';
+
+            // 距离显示
+            const distEl = document.getElementById('distanceValue');
+            if (data.distance !== null && data.distance !== undefined) {
+                distEl.textContent = data.distance.toFixed(2);
+                distEl.classList.remove('placeholder');
+            } else {
+                distEl.textContent = '--';
+                distEl.classList.add('placeholder');
+            }
+            document.getElementById('updateBadge').textContent = data.last_update || '--';
 
             // 信号质量
             setCorrelation('corrA', data.corr_A);
@@ -1650,19 +3110,44 @@ if __name__ == "__main__":
             document.getElementById('deltaTime').textContent = data.delta_time.toFixed(4) + ' s';
             document.getElementById('deltaSamples').textContent = data.delta_samples.toLocaleString();
             document.getElementById('count').textContent = data.measure_count;
-            document.getElementById('lastUpdate').textContent = data.last_update || '--';
 
-            // 日志
+            // 更新图表
+            if (data.measure_count > lastMeasureCount && data.distance !== null && data.distance !== undefined) {
+                lastMeasureCount = data.measure_count;
+                
+                const latestData = data.distance_history[0];
+                
+                chartLabels.push(data.last_update);
+                chartData.push(data.distance);
+                chartHistory.push(latestData || { time: data.last_update, distance: data.distance });
+                
+                if (chartLabels.length > MAX_CHART_POINTS) {
+                    chartLabels.shift();
+                    chartData.shift();
+                    chartHistory.shift();
+                }
+                
+                distanceChart.update('none');
+                document.getElementById('chartPoints').textContent = chartData.length + ' 点';
+            }
+
+            // 日志（带音频标记和点击功能）
+            logsData = data.logs || [];
             const logEl = document.getElementById('logContainer');
-            if (data.logs && data.logs.length > 0) {
-                logEl.innerHTML = data.logs.map(log => {
+            if (logsData.length > 0) {
+                logEl.innerHTML = logsData.map((log, idx) => {
                     const levelClass = log.level.toLowerCase();
-                    return `<div class="log-line">
+                    const hasAudio = log.audio_file ? 'has-audio' : '';
+                    const audioIcon = log.audio_file ? '<span class="log-audio-icon">🔊</span>' : '';
+                    const onclick = log.audio_file ? `onclick="showLogAnalysis(${idx})"` : '';
+                    return `<div class="log-line ${hasAudio}" ${onclick}>
                         <span class="log-time">${log.time}</span>
                         <span class="log-level ${levelClass}">[${log.level}]</span>
                         <span class="log-msg">${log.msg}</span>
+                        ${audioIcon}
                     </div>`;
                 }).join('');
+                document.getElementById('logCount').textContent = logsData.length + ' 条';
             }
         }
 

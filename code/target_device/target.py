@@ -1,5 +1,5 @@
 """
-锚节点（设备 A）- BeepBeep 声波测距
+目标设备（设备 B）- BeepBeep 声波测距
 """
 
 import sys
@@ -13,19 +13,18 @@ sys.path.append("..")
 from common.config import *
 from common.signal_processing import *
 
-class AnchorNode:
-    def __init__(self):
+class TargetDevice:
+    def __init__(self, server_ip):
+        self.server_ip = server_ip
         self.audio = pyaudio.PyAudio()
-        self.server_socket = None
         self.client_socket = None
         
-        # 选择音频设备
         self.input_device_index = None
         self.output_device_index = None
         self.find_audio_devices()
 
     def log(self, msg):
-        print(f"[锚节点] {msg}")
+        print(f"[目标设备] {msg}")
 
     def find_audio_devices(self):
         """查找音频设备"""
@@ -43,16 +42,11 @@ class AnchorNode:
         
         self.log(f"使用输入设备: {self.input_device_index}, 输出设备: {self.output_device_index}")
 
-    def start_server(self):
-        """启动TCP服务器"""
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind((SERVER_IP, SERVER_PORT))
-        self.server_socket.listen(1)
-
-        self.log(f"服务器启动: {SERVER_IP}:{SERVER_PORT}")
-        self.client_socket, addr = self.server_socket.accept()
-        self.log(f"设备B已连接: {addr}")
+    def connect(self):
+        """连接到锚节点"""
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket.connect((self.server_ip, SERVER_PORT))
+        self.log(f"已连接到锚节点: {self.server_ip}:{SERVER_PORT}")
 
     def measure_distance(self):
         """执行一次测距"""
@@ -75,20 +69,16 @@ class AnchorNode:
             method='logarithmic'
         )
 
-        self.log("准备开始测量...")
+        # 等待锚节点准备信号
+        ready_msg = self.client_socket.recv(1024).decode().strip()
+        if ready_msg != "READY":
+            return "ERROR"
         
-        # 同步：发送准备信号
+        self.log("收到准备信号")
         self.client_socket.sendall(b"READY\n")
-        response = self.client_socket.recv(1024).decode().strip()
         
-        if response != "READY":
-            self.log(f"同步失败: {response}")
-            return None
-
-        # 倒计时
-        for i in range(3, 0, -1):
-            self.log(f"倒计时: {i}")
-            time.sleep(1.0)
+        # 等待倒计时（3秒）
+        time.sleep(3.0)
         
         self.log("开始测量！")
         
@@ -113,20 +103,27 @@ class AnchorNode:
                 rate=SAMPLE_RATE,
                 output=True,
                 output_device_index=self.output_device_index,
-                frames_per_buffer=len(chirp_A)
+                frames_per_buffer=len(chirp_B)
             )
 
-            # 同时开始录音和播放
-            output_stream.write(chirp_A.tobytes())
-            
-            # 持续录音
+            # 同时开始录音，延迟播放 Chirp B - 使用config中的CHIRP_B_DELAY
             frame_idx = 0
+            chirp_B_played = False
+            play_frame_target = int(SAMPLE_RATE * CHIRP_B_DELAY)
+            
             while frame_idx < record_frames:
                 chunk_size = min(CHUNK_SIZE, record_frames - frame_idx)
                 try:
                     audio_chunk = input_stream.read(chunk_size, exception_on_overflow=False)
                     chunk_data = np.frombuffer(audio_chunk, dtype=np.float32)
                     recorded_data[frame_idx:frame_idx + len(chunk_data)] = chunk_data
+                    
+                    # 在指定时间播放 Chirp B
+                    if not chirp_B_played and frame_idx >= play_frame_target:
+                        self.log(f"播放 Chirp B (延迟 {CHIRP_B_DELAY}s)")
+                        output_stream.write(chirp_B.tobytes())
+                        chirp_B_played = True
+                    
                     frame_idx += len(chunk_data)
                 except IOError:
                     continue
@@ -138,89 +135,49 @@ class AnchorNode:
             
         except Exception as e:
             self.log(f"录音错误: {e}")
-            return None
+            return "ERROR"
 
         self.log("录音完成，分析信号...")
         
         # 保存调试音频 - 使用signal_processing中的函数
         if SAVE_AUDIO:
             timestamp = datetime.now().strftime("%H%M%S")
-            save_debug_audio(recorded_data, f"anchor_{timestamp}.wav", SAMPLE_RATE)
+            save_debug_audio(recorded_data, f"target_{timestamp}.wav", SAMPLE_RATE)
         
         # 检测信号 - 使用signal_processing中的函数
         self.log("检测 Chirp A...")
-        t_A1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
+        t_B1, corr_A = find_chirp_position(recorded_data, chirp_A, SAMPLE_RATE)
         
         self.log("检测 Chirp B...")
-        t_A2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
+        t_B2, corr_B = find_chirp_position(recorded_data, chirp_B, SAMPLE_RATE)
         
-        self.log(f"✓ Chirp A: t={t_A1:.3f}s, 相关度={corr_A:.3f}")
-        self.log(f"✓ Chirp B: t={t_A2:.3f}s, 相关度={corr_B:.3f}")
-
-        # 可视化（仅第一次）
-        if not hasattr(self, '_visualized'):
-            try:
-                from common.visualize import plot_signal_analysis, plot_correlation_analysis
-                self.log("生成信号分析图...")
-                plot_signal_analysis(recorded_data, chirp_A, chirp_B, SAMPLE_RATE)
-                plot_correlation_analysis(recorded_data, chirp_A, chirp_B, t_A1, t_A2, SAMPLE_RATE)
-                self._visualized = True
-            except ImportError:
-                self.log("可视化模块未找到，跳过")
+        self.log(f"✓ Chirp A: t={t_B1:.3f}s, 相关度={corr_A:.3f}")
+        self.log(f"✓ Chirp B: t={t_B2:.3f}s, 相关度={corr_B:.3f}")
         
-        # 接收设备B的时间差
-        try:
-            self.client_socket.settimeout(5.0)
-            delta_B_str = self.client_socket.recv(1024).decode().strip()
-            
-            if delta_B_str.startswith("ERROR"):
-                self.log(f"设备B检测失败: {delta_B_str}")
-                return None
-            
-            # 设备B发送的是样本数差，转换为时间
-            delta_B_samples = float(delta_B_str)
-            delta_B = delta_B_samples / SAMPLE_RATE
-            
-            # 计算距离 - 使用signal_processing中的函数
-            t_B1 = 0  # 占位符，实际不使用
-            t_B2 = delta_B  # 使用时间差
-            distance = calculate_distance_beepbeep(t_A1, t_A2, t_B1, t_B2)
-            
-            self.log(f"📏 测距结果: {distance:.3f} 米")
-            
-            return distance
-            
-        except Exception as e:
-            self.log(f"接收设备B数据失败: {e}")
-            return None
+        # 发送样本数差（而非时间差）
+        p1 = int(t_B1 * SAMPLE_RATE)
+        p2 = int(t_B2 * SAMPLE_RATE)
+        delta_samples = p2 - p1
+        
+        self.log(f"发送样本数差: {delta_samples}")
+        
+        return str(delta_samples)
 
     def run(self):
         """主循环"""
         try:
-            self.start_server()
+            self.connect()
             self.log("="*50)
-            self.log("BeepBeep 声波测距系统启动")
+            self.log("等待锚节点发起测距")
             self.log("="*50)
-
-            count = 0
-            results = []
 
             while True:
-                count += 1
-                self.log(f"\n{'='*50}")
-                self.log(f"第 {count} 次测量")
-                self.log(f"{'='*50}")
+                result = self.measure_distance()
                 
-                distance = self.measure_distance()
-                
-                if distance is not None:
-                    results.append(distance)
-                    
-                    if len(results) >= 2:
-                        recent = results[-5:]
-                        self.log(f"\n📊 统计 (最近{len(recent)}次):")
-                        self.log(f"  平均: {np.mean(recent):.3f}m")
-                        self.log(f"  标准差: {np.std(recent):.3f}m")
+                if result != "ERROR":
+                    self.client_socket.sendall(f"{result}\n".encode())
+                else:
+                    self.client_socket.sendall(b"ERROR\n")
                 
                 time.sleep(2)
                 
@@ -229,10 +186,14 @@ class AnchorNode:
         finally:
             if self.client_socket:
                 self.client_socket.close()
-            if self.server_socket:
-                self.server_socket.close()
             self.audio.terminate()
             self.log("已退出")
 
 if __name__ == "__main__":
-    AnchorNode().run()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="目标设备（BeepBeep）")
+    parser.add_argument("--server-ip", required=True, help="锚节点IP地址")
+    args = parser.parse_args()
+    
+    TargetDevice(args.server_ip).run()

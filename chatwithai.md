@@ -69,15 +69,17 @@ d）测距刷新率：测试系统每秒有效输出测距结果的次数，要�
 ```cmd
 SoundRuler/code/
 ├── anchor_node/
-│   ├── anchor.py      # 锚节点主程序
-│   └── visualize.py   # 对应音频分析程序
+│   ├── dashboard.html  # 锚节点的前端网页界面
+│   ├── anchor.py       # 锚节点主程序
+│   └── visualize.py    # 对应音频分析程序
 ├── common/
 │   ├── config.py           # 配置文件
 │   ├── net_transport.py    # 网络传输相关
 │   └── signal_processing.py # 信号处理
 ├── target_device/
-│   ├── target.py     # 目标设备主程序
-│   └── visualize.py  # 对应音频分析程序
+│   ├── dashboard.html   # 目标设备的前端网页界面
+│   ├── target.py        # 目标设备主程序
+│   └── visualize.py     # 对应音频分析程序
 └── README.md         # 项目说明文档
 ```
 
@@ -90,6 +92,8 @@ import threading
 import pyaudio
 import numpy as np
 import datetime
+from flask import Flask, jsonify, send_from_directory
+from flask_cors import CORS
 
 sys.path.append("..")
 from common.config import *
@@ -99,6 +103,91 @@ from common.net_transport import AnchorServer, logger
 # === 调试配置 ===
 SAVE_AUDIO = True
 DISTANCE_OFFSET = 0.0
+WEB_PORT = 8080  # Web界面端口
+
+# === Flask 应用 ===
+app = Flask(__name__, static_folder='.')
+CORS(app)
+
+# === 全局状态（线程安全）===
+class AnchorState:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.connected = False
+        self.distance = None
+        self.raw_distance = None
+        self.corr_A = 0.0
+        self.corr_B = 0.0
+        self.t_A = 0.0
+        self.t_B = 0.0
+        self.jitter = 0.0
+        self.measure_count = 0
+        self.history = []
+        self.last_update = None
+        self.fps = 0.0
+        self._timestamps = []
+    
+    def update(self, raw_dist, median_dist, corr_A, corr_B, t_A, t_B, history):
+        with self._lock:
+            self.raw_distance = raw_dist
+            self.distance = median_dist
+            self.corr_A = corr_A
+            self.corr_B = corr_B
+            self.t_A = t_A
+            self.t_B = t_B
+            self.jitter = float(np.std(history)) if len(history) > 1 else 0.0
+            self.measure_count += 1
+            self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            # 更新历史记录
+            self.history.insert(0, {
+                "time": self.last_update,
+                "distance": round(median_dist, 3)
+            })
+            if len(self.history) > 10:
+                self.history.pop()
+            
+            # 计算FPS
+            now = time.time()
+            self._timestamps.append(now)
+            self._timestamps = [t for t in self._timestamps if now - t < 5]
+            self.fps = len(self._timestamps) / 5.0 if self._timestamps else 0
+    
+    def set_connected(self, status):
+        with self._lock:
+            self.connected = status
+    
+    def get_state(self):
+        with self._lock:
+            return {
+                "connected": self.connected,
+                "distance": round(self.distance, 3) if self.distance else None,
+                "raw_distance": round(self.raw_distance, 3) if self.raw_distance else None,
+                "corr_A": round(self.corr_A, 3),
+                "corr_B": round(self.corr_B, 3),
+                "t_A": round(self.t_A, 4),
+                "t_B": round(self.t_B, 4),
+                "jitter": round(self.jitter, 3),
+                "measure_count": self.measure_count,
+                "fps": round(self.fps, 1),
+                "last_update": self.last_update,
+                "history": self.history[:5]
+            }
+
+state = AnchorState()
+
+# === Flask 路由 ===
+@app.route('/')
+def index():
+    return send_from_directory('.', 'dashboard.html')
+
+@app.route('/api/status')
+def get_status():
+    return jsonify(state.get_state())
+
+def run_web_server():
+    app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
+
 
 class AnchorNode:
     def __init__(self):
@@ -114,22 +203,16 @@ class AnchorNode:
         
         self.history = []
 
-        # ==========================================
-        # 核心改动：在初始化时就打开流，并一直保持
-        # ==========================================
         logger.info("正在初始化音频流 (Long-lived Streams)...")
-        # 输出流 (播放)
         self.stream_out = self.audio.open(
             format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
             output=True, output_device_index=self.output_device_index
         )
-        # 输入流 (录音)
         self.stream_in = self.audio.open(
             format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
             input=True, input_device_index=self.input_device_index,
             frames_per_buffer=CHUNK_SIZE
         )
-        # 预热：写入一点静音，读取一点垃圾数据
         self.stream_out.write(np.zeros(CHUNK_SIZE, dtype=np.float32).tobytes())
         self.stream_in.start_stream() 
         logger.info("音频流已锁定。")
@@ -144,70 +227,53 @@ class AnchorNode:
                 self.output_device_index = i
 
     def _flush_input(self):
-        """清空麦克风缓冲区中的旧数据"""
-        # 读取并丢弃当前缓冲区的所有数据
         if self.stream_in.get_read_available() > 0:
             bytes_to_read = self.stream_in.get_read_available()
             self.stream_in.read(bytes_to_read, exception_on_overflow=False)
 
     def _play_A_thread(self):
-        """在专用线程中播放"""
         try:
             self.stream_out.write(self.chirp_A.tobytes())
         except Exception as e:
             logger.error(f"Play Error: {e}")
 
     def measure_cycle(self):
-        # 1. 握手
         if not self.net.send_cmd({"cmd": "START"}): return None
         
-        # 2. 关键：清空之前的录音缓存，保证时间轴对齐
         self._flush_input()
-        
-        # 3. 等待 Target 就绪 (0.8s)
         time.sleep(0.8)
 
-        # 4. 录音 & 播放
-        # 不需要 open/close，直接 read/write
         frames_to_record = int(SAMPLE_RATE * 2.5)
         buffer = []
         
-        # 启动播放线程
         threading.Thread(target=self._play_A_thread).start()
         
-        # 循环读取
         total_read = 0
         while total_read < frames_to_record:
-            # 注意：这里不能阻塞太久，否则会影响时序
             data = self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
             buffer.append(data)
             total_read += CHUNK_SIZE
             
-        # 拼接数据
         full_buffer = np.frombuffer(b''.join(buffer), dtype=np.float32)
-        # 截取需要的长度
         full_buffer = full_buffer[:frames_to_record]
 
-        # 5. 接收 Target 数据
         resp = self.net.recv_resp(timeout=3.0)
         ts = datetime.datetime.now().strftime("%H%M%S")
         
         if not resp:
             if SAVE_AUDIO: save_debug_audio(full_buffer, f"{ts}_NoResp.wav")
-            return None
+            return None, None, None, None, None
         
         delta_B = float(resp.get('delta', 0)) / SAMPLE_RATE
         
-        # 6. 分析
         t_A, corr_A = find_chirp_position(full_buffer, self.chirp_A, SAMPLE_RATE)
         t_B, corr_B = find_chirp_position(full_buffer, self.chirp_B, SAMPLE_RATE)
         
         if corr_A < 0.3 or corr_B < 0.3:
             print(f"\r [信号差] A:{corr_A:.2f} B:{corr_B:.2f}", end="")
             if SAVE_AUDIO: save_debug_audio(full_buffer, f"{ts}_BadSignal.wav")
-            return None
+            return None, corr_A, corr_B, t_A, t_B
 
-        # 7. 计算
         delta_A = t_B - t_A
         time_diff = delta_A - delta_B
         raw_dist = (time_diff * 343.0) / 2.0
@@ -215,19 +281,28 @@ class AnchorNode:
         if SAVE_AUDIO: 
              save_debug_audio(full_buffer, f"{ts}_OK_{raw_dist:.1f}m.wav")
 
-        return raw_dist
+        return raw_dist, corr_A, corr_B, t_A, t_B
 
     def run(self):
+        # 启动Web服务器线程
+        web_thread = threading.Thread(target=run_web_server, daemon=True)
+        web_thread.start()
+        logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
+        
         self.net.start()
         logger.info(f"Anchor Ready. Offset: {DISTANCE_OFFSET}m")
         
         while True:
             if not self.net.client_conn:
+                state.set_connected(False)
                 time.sleep(1)
                 continue
 
+            state.set_connected(True)
+
             try:
-                raw = self.measure_cycle()
+                result = self.measure_cycle()
+                raw, corr_A, corr_B, t_A, t_B = result if result else (None, 0, 0, 0, 0)
                 
                 if raw is not None:
                     real_dist = raw - DISTANCE_OFFSET
@@ -235,12 +310,14 @@ class AnchorNode:
                     if len(self.history) > 5: self.history.pop(0)
                     median_dist = np.median(self.history)
                     
+                    # 更新全局状态
+                    state.update(raw, median_dist, corr_A, corr_B, t_A, t_B, self.history)
+                    
                     status = "✅" if abs(median_dist) < 50 else "❌"
                     print(f"\r {status} 稳定测量: {median_dist:.3f}m (原始: {raw:.2f}m) | 抖动: {np.std(self.history):.2f}", end="")
                 
             except Exception as e:
                 logger.error(f"Loop Error: {e}")
-                # 出错时尝试重启流
                 try:
                     self.stream_in.stop_stream()
                     self.stream_in.start_stream()
@@ -249,7 +326,6 @@ class AnchorNode:
             time.sleep(0.1)
     
     def __del__(self):
-        # 退出时清理
         self.stream_out.stop_stream()
         self.stream_out.close()
         self.stream_in.stop_stream()
@@ -258,7 +334,450 @@ class AnchorNode:
 
 if __name__ == "__main__":
     AnchorNode().run()
+```
 
+### anchor_node/dashboard.html
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>锚节点 · SoundRuler</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #f5f5f7;
+            --card: #ffffff;
+            --text: #1d1d1f;
+            --text-secondary: #86868b;
+            --border: #e5e5e5;
+            --accent: #007aff;
+            --success: #34c759;
+            --warning: #ff9500;
+            --error: #ff3b30;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 32px 20px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+
+        .device-badge {
+            display: inline-block;
+            background: var(--text);
+            color: white;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+
+        header h1 {
+            font-size: 28px;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 24px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .status-dot.online { background: var(--success); }
+        .status-dot.offline { background: var(--error); }
+        .status-dot.waiting { 
+            background: var(--warning); 
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .card {
+            background: var(--card);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .card-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .card-badge {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            background: #e8f5e9;
+            color: var(--success);
+            font-weight: 500;
+        }
+
+        .distance-display {
+            text-align: center;
+            padding: 16px 0;
+        }
+
+        .distance-value {
+            font-size: 64px;
+            font-weight: 600;
+            letter-spacing: -2px;
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .distance-value.placeholder {
+            color: var(--text-secondary);
+        }
+
+        .distance-unit {
+            font-size: 20px;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-left: 2px;
+        }
+
+        .distance-sub {
+            margin-top: 12px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .distance-sub span {
+            background: var(--bg);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .metric-box {
+            background: var(--bg);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .metric-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+
+        .metric-value {
+            font-size: 20px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .metric-value.good { color: var(--success); }
+        .metric-value.medium { color: var(--warning); }
+        .metric-value.bad { color: var(--error); }
+
+        .progress-bar {
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--success);
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
+
+        .progress-fill.medium { background: var(--warning); }
+        .progress-fill.bad { background: var(--error); }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 14px 8px;
+            background: var(--bg);
+            border-radius: 10px;
+        }
+
+        .stat-label {
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
+
+        .stat-value {
+            font-size: 15px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .history-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            background: var(--bg);
+            border-radius: 8px;
+            font-size: 13px;
+        }
+
+        .history-time {
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .history-value {
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 32px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 32px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="device-badge">ANCHOR</div>
+            <h1>声波测距系统</h1>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-dot waiting" id="connDot"></span>
+                <span id="connText">等待连接</span>
+            </div>
+            <div class="status-item">
+                <span>端口 20000</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">测距结果</span>
+                <span class="card-badge" id="updateBadge">--</span>
+            </div>
+            <div class="distance-display">
+                <span class="distance-value placeholder" id="distanceValue">--</span>
+                <span class="distance-unit">m</span>
+                <div class="distance-sub">
+                    原始值: <span id="rawValue">--</span> m
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title" style="margin-bottom:16px;">信号质量</div>
+            <div class="metrics-row">
+                <div class="metric-box">
+                    <div class="metric-label">Chirp A 相关度</div>
+                    <div class="metric-value" id="corrA">--</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="corrABar" style="width:0%"></div>
+                    </div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Chirp B 相关度</div>
+                    <div class="metric-value" id="corrB">--</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="corrBBar" style="width:0%"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title" style="margin-bottom:16px;">统计数据</div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-label">抖动</div>
+                    <div class="stat-value" id="jitter">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">测量次数</div>
+                    <div class="stat-value" id="count">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">刷新率</div>
+                    <div class="stat-value" id="fps">-- Hz</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Δt</div>
+                    <div class="stat-value" id="deltaT">--</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title" style="margin-bottom:16px;">历史记录</div>
+            <div class="history-list" id="historyList">
+                <div class="empty-state">暂无数据</div>
+            </div>
+        </div>
+
+        <footer>SoundRuler · BeepBeep Protocol</footer>
+    </div>
+
+    <script>
+        const API_URL = '/api/status';
+
+        function updateUI(data) {
+            // 连接状态
+            const dot = document.getElementById('connDot');
+            const text = document.getElementById('connText');
+            dot.className = 'status-dot ' + (data.connected ? 'online' : 'waiting');
+            text.textContent = data.connected ? '目标设备已连接' : '等待连接';
+
+            // 距离
+            const distEl = document.getElementById('distanceValue');
+            if (data.distance !== null) {
+                distEl.textContent = data.distance.toFixed(2);
+                distEl.classList.remove('placeholder');
+            } else {
+                distEl.textContent = '--';
+                distEl.classList.add('placeholder');
+            }
+            document.getElementById('rawValue').textContent = data.raw_distance !== null ? data.raw_distance.toFixed(2) : '--';
+            document.getElementById('updateBadge').textContent = data.last_update || '--';
+
+            // 信号质量
+            setCorrelation('corrA', 'corrABar', data.corr_A);
+            setCorrelation('corrB', 'corrBBar', data.corr_B);
+
+            // 统计
+            document.getElementById('jitter').textContent = data.jitter.toFixed(3) + ' m';
+            document.getElementById('count').textContent = data.measure_count;
+            document.getElementById('fps').textContent = data.fps.toFixed(1) + ' Hz';
+            document.getElementById('deltaT').textContent = (data.t_B - data.t_A).toFixed(3) + 's';
+
+            // 历史
+            const histList = document.getElementById('historyList');
+            if (data.history && data.history.length > 0) {
+                histList.innerHTML = data.history.map(h => `
+                    <div class="history-item">
+                        <span class="history-time">${h.time}</span>
+                        <span class="history-value">${h.distance.toFixed(3)} m</span>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function setCorrelation(valId, barId, val) {
+            const el = document.getElementById(valId);
+            const bar = document.getElementById(barId);
+            el.textContent = val.toFixed(2);
+            bar.style.width = (val * 100) + '%';
+
+            el.className = 'metric-value';
+            bar.className = 'progress-fill';
+            if (val >= 0.7) {
+                el.classList.add('good');
+            } else if (val >= 0.5) {
+                el.classList.add('medium');
+                bar.classList.add('medium');
+            } else {
+                el.classList.add('bad');
+                bar.classList.add('bad');
+            }
+        }
+
+        async function fetchData() {
+            try {
+                const resp = await fetch(API_URL);
+                const data = await resp.json();
+                updateUI(data);
+            } catch (e) {
+                console.error('Fetch error:', e);
+            }
+        }
+
+        fetchData();
+        setInterval(fetchData, 500);
+    </script>
+</body>
+</html>
 ```
 
 ### anchor_node/visualize.py
@@ -552,11 +1071,95 @@ import time
 import threading
 import pyaudio
 import numpy as np
+import datetime
+from flask import Flask, jsonify, send_from_directory
+from flask_cors import CORS
 
 sys.path.append("..")
 from common.config import *
 from common.signal_processing import *
 from common.net_transport import TargetClient, logger
+
+WEB_PORT = 8081  # Target端Web界面端口
+
+# === Flask 应用 ===
+app = Flask(__name__, static_folder='.')
+CORS(app)
+
+# === 全局状态 ===
+class TargetState:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.connected = False
+        self.server_ip = ""
+        self.measuring = False
+        self.corr_A = 0.0
+        self.corr_B = 0.0
+        self.t_A = 0.0
+        self.t_B = 0.0
+        self.delta_samples = 0
+        self.delta_time = 0.0
+        self.measure_count = 0
+        self.last_update = None
+        self.logs = []
+    
+    def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples):
+        with self._lock:
+            self.corr_A = corr_A
+            self.corr_B = corr_B
+            self.t_A = t_A
+            self.t_B = t_B
+            self.delta_samples = delta_samples
+            self.delta_time = t_B - t_A
+            self.measure_count += 1
+            self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
+    
+    def set_connected(self, status, ip=""):
+        with self._lock:
+            self.connected = status
+            self.server_ip = ip
+    
+    def add_log(self, level, msg):
+        with self._lock:
+            self.logs.insert(0, {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": level,
+                "msg": msg
+            })
+            if len(self.logs) > 20:
+                self.logs.pop()
+    
+    def get_state(self):
+        with self._lock:
+            return {
+                "connected": self.connected,
+                "server_ip": self.server_ip,
+                "measuring": self.measuring,
+                "corr_A": round(self.corr_A, 3),
+                "corr_B": round(self.corr_B, 3),
+                "t_A": round(self.t_A, 4),
+                "t_B": round(self.t_B, 4),
+                "delta_samples": self.delta_samples,
+                "delta_time": round(self.delta_time, 4),
+                "measure_count": self.measure_count,
+                "last_update": self.last_update,
+                "logs": self.logs[:10]
+            }
+
+state = TargetState()
+
+# === Flask 路由 ===
+@app.route('/')
+def index():
+    return send_from_directory('.', 'dashboard.html')
+
+@app.route('/api/status')
+def get_status():
+    return jsonify(state.get_state())
+
+def run_web_server():
+    app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
+
 
 class TargetDevice:
     def __init__(self, ip):
@@ -566,33 +1169,29 @@ class TargetDevice:
         self.input_device_index = None
         self.output_device_index = None
         
-        # 1. 查找设备
         self._find_devices()
         
-        # 2. 生成信号
         self.chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
         self.chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
         
-        # 3. 初始化并锁定音频流 (核心修改)
         logger.info("正在初始化长效音频流...")
+        state.add_log("INFO", "正在初始化音频流...")
         
-        # 输出流 (用于播放 B)
         self.stream_out = self.audio.open(
             format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
             output=True, output_device_index=self.output_device_index
         )
         
-        # 输入流 (用于录音)
         self.stream_in = self.audio.open(
             format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
             input=True, input_device_index=self.input_device_index,
             frames_per_buffer=CHUNK_SIZE
         )
         
-        # 预热流 (消除第一次启动的延迟)
         self.stream_out.write(np.zeros(CHUNK_SIZE, dtype=np.float32).tobytes())
         self.stream_in.start_stream()
         logger.info("音频流已锁定，等待指令...")
+        state.add_log("OK", "音频流已锁定")
 
     def _find_devices(self):
         info = self.audio.get_host_api_info_by_index(0)
@@ -605,7 +1204,6 @@ class TargetDevice:
         logger.info(f"Using Devices: In={self.input_device_index} Out={self.output_device_index}")
 
     def _flush_input(self):
-        """[关键] 清空缓冲区，丢弃 Start 之前录到的无用数据"""
         try:
             if self.stream_in.get_read_available() > 0:
                 to_read = self.stream_in.get_read_available()
@@ -614,55 +1212,48 @@ class TargetDevice:
             pass
 
     def _play_delayed_B_thread(self):
-        """延迟播放线程"""
-        # 等待 1.5秒，避开 Anchor 的声音
         time.sleep(1.5)
         try:
-            # 直接写入已打开的流，不重新 Open
             self.stream_out.write(self.chirp_B.tobytes())
         except Exception as e:
             logger.error(f"Play Error: {e}")
 
     def loop(self):
         frames_to_record = int(SAMPLE_RATE * 2.5)
+        state.measuring = True
         
         while True:
-            # 1. 阻塞等待指令
             msg = self.net.recv_cmd()
             if not msg or msg.get('cmd') != 'START': 
                 continue
 
+            state.add_log("INFO", "收到 START 指令")
+
             try:
-                # 2. [关键] 清空麦克风缓存
-                # 这就像是按下秒表的“归零”键
                 self._flush_input()
                 
-                # 3. 启动“延迟播放”线程
                 threading.Thread(target=self._play_delayed_B_thread).start()
                 
-                # 4. 立即开始读取录音数据
                 buffer = []
                 total_read = 0
                 
                 while total_read < frames_to_record:
-                    # 从流中读取
                     data = self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
                     buffer.append(data)
                     total_read += CHUNK_SIZE
 
-                # 5. 拼接数据
                 full_buffer = np.frombuffer(b''.join(buffer), dtype=np.float32)
                 full_buffer = full_buffer[:frames_to_record]
 
-                # 6. 分析信号
                 t_A, corr_A = find_chirp_position(full_buffer, self.chirp_A, SAMPLE_RATE)
                 t_B, corr_B = find_chirp_position(full_buffer, self.chirp_B, SAMPLE_RATE)
                 
-                # 计算 Delta (T_emit - T_recv)
-                # 注意：如果 t_B (自己发的时间) 没找到，说明播放出问题了
                 delta_samples = int((t_B - t_A) * SAMPLE_RATE)
                 
-                # 7. 回传数据
+                # 更新全局状态
+                state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples)
+                state.add_log("OK", f"测量完成 ΔT={t_B-t_A:.3f}s")
+                
                 logger.info(f"Process: A={corr_A:.2f}@t={t_A:.3f}s | B={corr_B:.2f}@t={t_B:.3f}s")
                 
                 self.net.send_data({
@@ -673,20 +1264,31 @@ class TargetDevice:
 
             except Exception as e:
                 logger.error(f"Loop Error: {e}")
-                # 尝试重置流以恢复
+                state.add_log("ERROR", str(e))
                 try:
                     self.stream_in.stop_stream()
                     self.stream_in.start_stream()
                 except: pass
 
     def run(self):
+        # 启动Web服务器
+        web_thread = threading.Thread(target=run_web_server, daemon=True)
+        web_thread.start()
+        logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
+        state.add_log("INFO", f"Web界面端口: {WEB_PORT}")
+        
         while True:
+            state.add_log("INFO", f"正在连接 {self.server_ip}...")
             if self.net.connect(self.server_ip, SERVER_PORT):
+                state.set_connected(True, f"{self.server_ip}:{SERVER_PORT}")
+                state.add_log("OK", "已连接锚节点")
                 self.loop()
+            else:
+                state.set_connected(False)
+                state.add_log("WARN", "连接失败，重试中...")
             time.sleep(2)
 
     def __del__(self):
-        # 只有在程序彻底退出时才关闭流
         try:
             self.stream_out.stop_stream()
             self.stream_out.close()
@@ -701,7 +1303,393 @@ if __name__ == "__main__":
     parser.add_argument("--server-ip", required=True)
     args = parser.parse_args()
     TargetDevice(args.server_ip).run()
+```
 
+### target_device/dashboard.html
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>目标设备 · SoundRuler</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #f5f5f7;
+            --card: #ffffff;
+            --text: #1d1d1f;
+            --text-secondary: #86868b;
+            --border: #e5e5e5;
+            --accent: #007aff;
+            --success: #34c759;
+            --warning: #ff9500;
+            --error: #ff3b30;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 32px 20px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+
+        .device-badge {
+            display: inline-block;
+            background: var(--accent);
+            color: white;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+
+        header h1 {
+            font-size: 28px;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 24px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .status-dot.online { background: var(--success); }
+        .status-dot.offline { background: var(--error); }
+        .status-dot.waiting { 
+            background: var(--warning); 
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .card {
+            background: var(--card);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .card-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .activity-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--success);
+        }
+
+        .activity-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--success);
+            border-radius: 50%;
+            animation: pulse 1s infinite;
+        }
+
+        .signal-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .signal-box {
+            background: var(--bg);
+            border-radius: 12px;
+            padding: 18px;
+            text-align: center;
+        }
+
+        .signal-name {
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .signal-corr {
+            font-size: 28px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .signal-corr.good { color: var(--success); }
+        .signal-corr.medium { color: var(--warning); }
+        .signal-corr.bad { color: var(--error); }
+
+        .signal-time {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .data-list {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .data-row:last-child {
+            border-bottom: none;
+        }
+
+        .data-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .data-value {
+            font-size: 14px;
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .log-container {
+            background: var(--bg);
+            border-radius: 10px;
+            padding: 12px 14px;
+            max-height: 180px;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+
+        .log-line {
+            display: flex;
+            gap: 8px;
+            padding: 4px 0;
+            font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+        }
+
+        .log-time {
+            color: var(--text-secondary);
+            flex-shrink: 0;
+        }
+
+        .log-level {
+            flex-shrink: 0;
+            font-weight: 500;
+        }
+
+        .log-level.ok { color: var(--success); }
+        .log-level.info { color: var(--accent); }
+        .log-level.warn { color: var(--warning); }
+        .log-level.error { color: var(--error); }
+
+        .log-msg {
+            color: var(--text);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 24px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 32px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="device-badge">TARGET</div>
+            <h1>声波测距系统</h1>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-dot waiting" id="connDot"></span>
+                <span id="connText">等待连接</span>
+            </div>
+            <div class="status-item" id="serverInfo">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">信号检测</span>
+                <div class="activity-indicator" id="activity" style="display:none;">
+                    <span class="activity-dot"></span>
+                    <span>测量中</span>
+                </div>
+            </div>
+            <div class="signal-grid">
+                <div class="signal-box">
+                    <div class="signal-name">Chirp A (接收)</div>
+                    <div class="signal-corr" id="corrA">--</div>
+                    <div class="signal-time">t = <span id="timeA">--</span> s</div>
+                </div>
+                <div class="signal-box">
+                    <div class="signal-name">Chirp B (发送)</div>
+                    <div class="signal-corr" id="corrB">--</div>
+                    <div class="signal-time">t = <span id="timeB">--</span> s</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title" style="margin-bottom:12px;">分析数据</div>
+            <div class="data-list">
+                <div class="data-row">
+                    <span class="data-label">时间差 Δt (B - A)</span>
+                    <span class="data-value" id="deltaTime">-- s</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">样本差 Δ samples</span>
+                    <span class="data-value" id="deltaSamples">--</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">测量次数</span>
+                    <span class="data-value" id="count">0</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">最后更新</span>
+                    <span class="data-value" id="lastUpdate">--</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title" style="margin-bottom:12px;">运行日志</div>
+            <div class="log-container" id="logContainer">
+                <div class="empty-state">等待数据...</div>
+            </div>
+        </div>
+
+        <footer>SoundRuler · BeepBeep Protocol</footer>
+    </div>
+
+    <script>
+        const API_URL = '/api/status';
+
+        function updateUI(data) {
+            // 连接状态
+            const dot = document.getElementById('connDot');
+            const text = document.getElementById('connText');
+            dot.className = 'status-dot ' + (data.connected ? 'online' : 'waiting');
+            text.textContent = data.connected ? '已连接锚节点' : '等待连接';
+            document.getElementById('serverInfo').textContent = data.server_ip || '--';
+
+            // 活动指示器
+            document.getElementById('activity').style.display = data.connected ? 'flex' : 'none';
+
+            // 信号质量
+            setCorrelation('corrA', data.corr_A);
+            setCorrelation('corrB', data.corr_B);
+            document.getElementById('timeA').textContent = data.t_A.toFixed(4);
+            document.getElementById('timeB').textContent = data.t_B.toFixed(4);
+
+            // 数据
+            document.getElementById('deltaTime').textContent = data.delta_time.toFixed(4) + ' s';
+            document.getElementById('deltaSamples').textContent = data.delta_samples.toLocaleString();
+            document.getElementById('count').textContent = data.measure_count;
+            document.getElementById('lastUpdate').textContent = data.last_update || '--';
+
+            // 日志
+            const logEl = document.getElementById('logContainer');
+            if (data.logs && data.logs.length > 0) {
+                logEl.innerHTML = data.logs.map(log => {
+                    const levelClass = log.level.toLowerCase();
+                    return `<div class="log-line">
+                        <span class="log-time">${log.time}</span>
+                        <span class="log-level ${levelClass}">[${log.level}]</span>
+                        <span class="log-msg">${log.msg}</span>
+                    </div>`;
+                }).join('');
+            }
+        }
+
+        function setCorrelation(id, val) {
+            const el = document.getElementById(id);
+            el.textContent = val.toFixed(2);
+            el.className = 'signal-corr';
+            if (val >= 0.7) el.classList.add('good');
+            else if (val >= 0.5) el.classList.add('medium');
+            else if (val > 0) el.classList.add('bad');
+        }
+
+        async function fetchData() {
+            try {
+                const resp = await fetch(API_URL);
+                const data = await resp.json();
+                updateUI(data);
+            } catch (e) {
+                console.error('Fetch error:', e);
+            }
+        }
+
+        fetchData();
+        setInterval(fetchData, 500);
+    </script>
+</body>
+</html>
 ```
 
 ### target_device/visualize.py

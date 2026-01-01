@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>锚节点 · SoundRuler</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         * {
             margin: 0;
@@ -33,7 +34,7 @@
         }
 
         .container {
-            max-width: 720px;
+            max-width: 800px;
             margin: 0 auto;
         }
 
@@ -162,6 +163,14 @@
             font-variant-numeric: tabular-nums;
         }
 
+        /* 图表容器 */
+        .chart-container {
+            position: relative;
+            height: 280px;
+            width: 100%;
+            margin-top: 8px;
+        }
+
         .metrics-row {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -235,6 +244,31 @@
             font-variant-numeric: tabular-nums;
         }
 
+        /* 可滚动日志容器 */
+        .log-container {
+            max-height: 250px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+
+        .log-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .log-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .log-container::-webkit-scrollbar-thumb {
+            background-color: var(--border);
+            border-radius: 3px;
+        }
+
+        .log-container::-webkit-scrollbar-thumb:hover {
+            background-color: var(--text-secondary);
+        }
+
         .history-list {
             display: flex;
             flex-direction: column;
@@ -261,6 +295,9 @@
             font-variant-numeric: tabular-nums;
         }
 
+        .history-value.good { color: var(--success); }
+        .history-value.warning { color: var(--warning); }
+
         .empty-state {
             text-align: center;
             padding: 32px;
@@ -273,6 +310,19 @@
             margin-top: 32px;
             font-size: 11px;
             color: var(--text-secondary);
+        }
+
+        /* 两列布局 */
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        @media (max-width: 700px) {
+            .two-col {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -307,52 +357,71 @@
             </div>
         </div>
 
+        <!-- 新增：距离折线图 -->
         <div class="card">
-            <div class="card-title" style="margin-bottom:16px;">信号质量</div>
-            <div class="metrics-row">
-                <div class="metric-box">
-                    <div class="metric-label">Chirp A 相关度</div>
-                    <div class="metric-value" id="corrA">--</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="corrABar" style="width:0%"></div>
+            <div class="card-header">
+                <span class="card-title">距离变化曲线</span>
+                <span class="card-badge" id="chartPoints">0 点</span>
+            </div>
+            <div class="chart-container">
+                <canvas id="distanceChart"></canvas>
+            </div>
+        </div>
+
+        <div class="two-col">
+            <div class="card">
+                <div class="card-title" style="margin-bottom:16px;">信号质量</div>
+                <div class="metrics-row">
+                    <div class="metric-box">
+                        <div class="metric-label">Chirp A 相关度</div>
+                        <div class="metric-value" id="corrA">--</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="corrABar" style="width:0%"></div>
+                        </div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Chirp B 相关度</div>
+                        <div class="metric-value" id="corrB">--</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="corrBBar" style="width:0%"></div>
+                        </div>
                     </div>
                 </div>
-                <div class="metric-box">
-                    <div class="metric-label">Chirp B 相关度</div>
-                    <div class="metric-value" id="corrB">--</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="corrBBar" style="width:0%"></div>
+            </div>
+
+            <div class="card">
+                <div class="card-title" style="margin-bottom:16px;">统计数据</div>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">抖动</div>
+                        <div class="stat-value" id="jitter">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">测量次数</div>
+                        <div class="stat-value" id="count">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">刷新率</div>
+                        <div class="stat-value" id="fps">-- Hz</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Δt</div>
+                        <div class="stat-value" id="deltaT">--</div>
                     </div>
                 </div>
             </div>
         </div>
 
+        <!-- 改进：可滚动的历史记录 -->
         <div class="card">
-            <div class="card-title" style="margin-bottom:16px;">统计数据</div>
-            <div class="stats-grid">
-                <div class="stat-item">
-                    <div class="stat-label">抖动</div>
-                    <div class="stat-value" id="jitter">--</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">测量次数</div>
-                    <div class="stat-value" id="count">0</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">刷新率</div>
-                    <div class="stat-value" id="fps">-- Hz</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Δt</div>
-                    <div class="stat-value" id="deltaT">--</div>
-                </div>
+            <div class="card-header">
+                <span class="card-title">历史记录</span>
+                <span class="card-badge" id="historyCount">0 条</span>
             </div>
-        </div>
-
-        <div class="card">
-            <div class="card-title" style="margin-bottom:16px;">历史记录</div>
-            <div class="history-list" id="historyList">
-                <div class="empty-state">暂无数据</div>
+            <div class="log-container" id="logContainer">
+                <div class="history-list" id="historyList">
+                    <div class="empty-state">暂无数据</div>
+                </div>
             </div>
         </div>
 
@@ -361,6 +430,92 @@
 
     <script>
         const API_URL = '/api/status';
+        const MAX_CHART_POINTS = 50;  // 图表最多显示的点数
+
+        // 图表数据
+        let chartLabels = [];
+        let chartData = [];
+
+        // 初始化图表
+        const ctx = document.getElementById('distanceChart').getContext('2d');
+        const distanceChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: chartLabels,
+                datasets: [{
+                    label: '距离 (m)',
+                    data: chartData,
+                    borderColor: '#007aff',
+                    backgroundColor: 'rgba(0, 122, 255, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#007aff',
+                    pointBorderColor: '#fff',
+                    pointBorderWidth: 1,
+                    pointHoverRadius: 5
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: {
+                    duration: 300
+                },
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        titleFont: { size: 12 },
+                        bodyFont: { size: 12 },
+                        padding: 10,
+                        cornerRadius: 8,
+                        displayColors: false,
+                        callbacks: {
+                            label: function(context) {
+                                return `距离: ${context.parsed.y.toFixed(3)} m`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        grid: {
+                            display: false
+                        },
+                        ticks: {
+                            maxTicksLimit: 8,
+                            font: { size: 10 },
+                            color: '#86868b'
+                        }
+                    },
+                    y: {
+                        display: true,
+                        grid: {
+                            color: 'rgba(0, 0, 0, 0.05)'
+                        },
+                        ticks: {
+                            font: { size: 10 },
+                            color: '#86868b',
+                            callback: function(value) {
+                                return value.toFixed(2) + 'm';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 记录上次的测量次数，用于判断是否有新数据
+        let lastMeasureCount = 0;
 
         function updateUI(data) {
             // 连接状态
@@ -391,15 +546,37 @@
             document.getElementById('fps').textContent = data.fps.toFixed(1) + ' Hz';
             document.getElementById('deltaT').textContent = (data.t_B - data.t_A).toFixed(3) + 's';
 
-            // 历史
+            // 更新图表（仅当有新数据时）
+            if (data.measure_count > lastMeasureCount && data.distance !== null) {
+                lastMeasureCount = data.measure_count;
+                
+                // 添加新数据点
+                chartLabels.push(data.last_update);
+                chartData.push(data.distance);
+                
+                // 限制数据点数量
+                if (chartLabels.length > MAX_CHART_POINTS) {
+                    chartLabels.shift();
+                    chartData.shift();
+                }
+                
+                distanceChart.update('none');  // 'none' 禁用动画以提高性能
+                document.getElementById('chartPoints').textContent = chartData.length + ' 点';
+            }
+
+            // 历史记录
             const histList = document.getElementById('historyList');
             if (data.history && data.history.length > 0) {
-                histList.innerHTML = data.history.map(h => `
-                    <div class="history-item">
-                        <span class="history-time">${h.time}</span>
-                        <span class="history-value">${h.distance.toFixed(3)} m</span>
-                    </div>
-                `).join('');
+                histList.innerHTML = data.history.map(h => {
+                    const valueClass = h.distance < 10 ? 'good' : (h.distance < 50 ? '' : 'warning');
+                    return `
+                        <div class="history-item">
+                            <span class="history-time">${h.time}</span>
+                            <span class="history-value ${valueClass}">${h.distance.toFixed(3)} m</span>
+                        </div>
+                    `;
+                }).join('');
+                document.getElementById('historyCount').textContent = data.history.length + ' 条';
             }
         }
 

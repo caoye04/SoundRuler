@@ -12,13 +12,11 @@ from common.config import *
 from common.signal_processing import *
 from common.net_transport import TargetClient, logger
 
-WEB_PORT = 8081  # Target端Web界面端口
+WEB_PORT = 8081
 
-# === Flask 应用 ===
 app = Flask(__name__, static_folder='.')
 CORS(app)
 
-# === 全局状态 ===
 class TargetState:
     def __init__(self):
         self._lock = threading.Lock()
@@ -34,6 +32,10 @@ class TargetState:
         self.measure_count = 0
         self.last_update = None
         self.logs = []
+        # 新增：距离数据
+        self.distance = None
+        self.raw_distance = None
+        self.distance_history = []
     
     def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples):
         with self._lock:
@@ -45,6 +47,21 @@ class TargetState:
             self.delta_time = t_B - t_A
             self.measure_count += 1
             self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
+    
+    def update_distance(self, distance, raw_distance, time_str):
+        """更新来自Anchor的距离数据"""
+        with self._lock:
+            self.distance = distance
+            self.raw_distance = raw_distance
+            self.last_update = time_str
+            
+            # 更新历史记录
+            self.distance_history.insert(0, {
+                "time": time_str,
+                "distance": distance
+            })
+            if len(self.distance_history) > 100:
+                self.distance_history.pop()
     
     def set_connected(self, status, ip=""):
         with self._lock:
@@ -58,7 +75,7 @@ class TargetState:
                 "level": level,
                 "msg": msg
             })
-            if len(self.logs) > 20:
+            if len(self.logs) > 100:  # 增加日志保存量
                 self.logs.pop()
     
     def get_state(self):
@@ -75,12 +92,15 @@ class TargetState:
                 "delta_time": round(self.delta_time, 4),
                 "measure_count": self.measure_count,
                 "last_update": self.last_update,
-                "logs": self.logs[:10]
+                "logs": self.logs,  # 返回所有日志
+                # 新增字段
+                "distance": round(self.distance, 3) if self.distance is not None else None,
+                "raw_distance": round(self.raw_distance, 3) if self.raw_distance is not None else None,
+                "distance_history": self.distance_history
             }
 
 state = TargetState()
 
-# === Flask 路由 ===
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -156,7 +176,21 @@ class TargetDevice:
         
         while True:
             msg = self.net.recv_cmd()
-            if not msg or msg.get('cmd') != 'START': 
+            if not msg:
+                continue
+            
+            cmd = msg.get('cmd')
+            
+            # **新增：处理距离更新消息**
+            if cmd == 'DISTANCE':
+                distance = msg.get('distance')
+                raw_distance = msg.get('raw_distance')
+                time_str = msg.get('time', datetime.datetime.now().strftime("%H:%M:%S"))
+                state.update_distance(distance, raw_distance, time_str)
+                state.add_log("OK", f"距离更新: {distance:.3f}m")
+                continue
+            
+            if cmd != 'START': 
                 continue
 
             state.add_log("INFO", "收到 START 指令")
@@ -182,7 +216,6 @@ class TargetDevice:
                 
                 delta_samples = int((t_B - t_A) * SAMPLE_RATE)
                 
-                # 更新全局状态
                 state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples)
                 state.add_log("OK", f"测量完成 ΔT={t_B-t_A:.3f}s")
                 
@@ -203,7 +236,6 @@ class TargetDevice:
                 except: pass
 
     def run(self):
-        # 启动Web服务器
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")

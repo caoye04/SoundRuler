@@ -15,7 +15,7 @@ from common.net_transport import AnchorServer, logger
 # === 调试配置 ===
 SAVE_AUDIO = True
 DISTANCE_OFFSET = 0.0
-WEB_PORT = 8080  # Web界面端口
+WEB_PORT = 8080
 
 # === Flask 应用 ===
 app = Flask(__name__, static_folder='.')
@@ -51,12 +51,12 @@ class AnchorState:
             self.measure_count += 1
             self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
             
-            # 更新历史记录
+            # 更新历史记录 - 增加保存数量
             self.history.insert(0, {
                 "time": self.last_update,
                 "distance": round(median_dist, 3)
             })
-            if len(self.history) > 10:
+            if len(self.history) > 100:  # 增加到100条
                 self.history.pop()
             
             # 计算FPS
@@ -83,12 +83,11 @@ class AnchorState:
                 "measure_count": self.measure_count,
                 "fps": round(self.fps, 1),
                 "last_update": self.last_update,
-                "history": self.history[:5]
+                "history": self.history  # 返回全部历史
             }
 
 state = AnchorState()
 
-# === Flask 路由 ===
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -196,7 +195,6 @@ class AnchorNode:
         return raw_dist, corr_A, corr_B, t_A, t_B
 
     def run(self):
-        # 启动Web服务器线程
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
@@ -224,6 +222,14 @@ class AnchorNode:
                     
                     # 更新全局状态
                     state.update(raw, median_dist, corr_A, corr_B, t_A, t_B, self.history)
+                    
+                    # **新增：将距离发送给Target**
+                    self.net.send_cmd({
+                        "cmd": "DISTANCE",
+                        "distance": round(float(median_dist), 3),
+                        "raw_distance": round(float(raw), 3),
+                        "time": state.last_update
+                    })
                     
                     status = "✅" if abs(median_dist) < 50 else "❌"
                     print(f"\r {status} 稳定测量: {median_dist:.3f}m (原始: {raw:.2f}m) | 抖动: {np.std(self.history):.2f}", end="")

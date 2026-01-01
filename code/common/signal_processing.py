@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import signal
 from .config import *
-
+from scipy.signal import butter, filtfilt
 def generate_chirp(f_start, f_end, duration=0.5, sample_rate=SAMPLE_RATE, 
                    amplitude=0.95, method='linear'):
     """生成调频信号
@@ -23,17 +23,17 @@ def generate_chirp(f_start, f_end, duration=0.5, sample_rate=SAMPLE_RATE,
     
     return chirp_signal.astype(np.float32)
 
+def bandpass_filter(data, lowcut, highcut, sample_rate, order=5):
+    """带通滤波器"""
+    nyquist = sample_rate / 2
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    filtered = filtfilt(b, a, data)
+    return filtered
 
-def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE, 
-                        first_peak_threshold=0.5):
-    """使用First Peak Detection检测信号起始位置（解决多径效应）
-    
-    Args:
-        recorded_data: 录音数据
-        chirp_ref: 参考chirp信号
-        sample_rate: 采样率
-        first_peak_threshold: 第一峰检测阈值（相对于最大值，默认0.7）
-    """
+def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE):
+    """使用标准NCC（归一化互相关）检测信号位置"""
     
     N = len(chirp_ref)
     M = len(recorded_data)
@@ -41,7 +41,7 @@ def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE,
     if M < N:
         return 0.0, 0.0
     
-    # 1. 标准互相关
+    # 1. 标准互相关（不要时间反转！）
     correlation = signal.correlate(recorded_data, chirp_ref, mode='valid')
     
     # 2. 计算局部能量
@@ -57,43 +57,34 @@ def find_chirp_position(recorded_data, chirp_ref, sample_rate=SAMPLE_RATE,
     ncc = correlation / (local_energy * template_energy + 1e-10)
     abs_ncc = np.abs(ncc)
     
-    # 5. 寻找全局最大值（可能是反射波）
+    # 5. 寻找全局最大值
     max_idx = np.argmax(abs_ncc)
     max_val = abs_ncc[max_idx]
     
-    # 6. First Peak Detection - 从前向后找第一个超过阈值的点
-    threshold = max_val * first_peak_threshold
-    
-    first_peak_idx = max_idx  # 默认值
-    for i in range(len(abs_ncc)):
-        if abs_ncc[i] >= threshold:
-            first_peak_idx = i
-            break
-    
-    # 7. 抛物线插值（亚样本精度）- 对first_peak进行插值
-    if 0 < first_peak_idx < len(abs_ncc) - 1:
-        y0 = abs_ncc[first_peak_idx - 1]
-        y1 = abs_ncc[first_peak_idx]
-        y2 = abs_ncc[first_peak_idx + 1]
+    # 6. 抛物线插值（亚样本精度）
+    if 0 < max_idx < len(abs_ncc) - 1:
+        y0 = abs_ncc[max_idx - 1]
+        y1 = abs_ncc[max_idx]
+        y2 = abs_ncc[max_idx + 1]
         denom = 2 * (y0 - 2*y1 + y2)
         if abs(denom) > 1e-10:
             delta = (y0 - y2) / denom
-            peak_idx = first_peak_idx + delta
+            peak_idx = max_idx + delta
         else:
-            peak_idx = first_peak_idx
+            peak_idx = max_idx
     else:
-        peak_idx = first_peak_idx
+        peak_idx = max_idx
     
-    # 8. 转换为时间
+    # 7. 转换为时间
     delay_time = peak_idx / sample_rate
-    normalized_corr = max_val  # 仍返回最大相关度作为信号质量指标
+    normalized_corr = max_val
     
     if DEBUG_MODE:
-        offset_ms = (max_idx - first_peak_idx) / sample_rate * 1000
-        print(f"  [检测] First Peak={delay_time:.3f}s (索引={peak_idx:.1f}), "
-              f"相关度={normalized_corr:.3f}, 比最大值提前{offset_ms:.1f}ms")
+        print(f"  [检测] 位置={delay_time:.3f}s (索引={peak_idx:.1f}), 相关度={normalized_corr:.3f}")
     
     return delay_time, normalized_corr
+
+
 
 def calculate_distance_beepbeep(t_A1, t_A2, t_B1, t_B2):
     """BeepBeep算法计算距离

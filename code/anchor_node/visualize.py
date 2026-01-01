@@ -12,7 +12,7 @@ import os
 sys.path.append('..')
 
 from common.config import *
-from common.signal_processing import generate_chirp, find_chirp_position
+from common.signal_processing import generate_chirp, find_chirp_position,bandpass_filter
 
 # 解决中文显示问题
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -54,7 +54,8 @@ def visualize_anchor_audio(filepath, save_path=None):
    
    # 检测chirp位置
    t_A, corr_A = find_chirp_position(audio, chirp_A, sample_rate)
-   t_B, corr_B = find_chirp_position(audio, chirp_B, sample_rate)
+   filtered_for_B = bandpass_filter(audio, 4000, 7000, SAMPLE_RATE)
+   t_B, corr_B = find_chirp_position(filtered_for_B, chirp_B, sample_rate)
    
    chirp_A_duration = len(chirp_A) / sample_rate
    chirp_B_duration = len(chirp_B) / sample_rate

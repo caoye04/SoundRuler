@@ -15,10 +15,6 @@ from common.net_transport import TargetClient, logger
 
 WEB_PORT = 8081
 
-# 关键改进：固定延迟参数（基于样本数）
-CHIRP_B_DELAY_SAMPLES = int(SAMPLE_RATE * 1.5)  # Chirp B 播放位置
-RECORD_DURATION_SAMPLES = int(SAMPLE_RATE * 3.0)  # 总录音时长
-
 app = Flask(__name__, static_folder='.')
 CORS(app)
 
@@ -37,6 +33,7 @@ class TargetState:
         self.measure_count = 0
         self.last_update = None
         self.logs = []
+        # 新增：距离数据
         self.distance = None
         self.raw_distance = None
         self.distance_history = []
@@ -50,12 +47,13 @@ class TargetState:
             self.delta_samples = delta_samples
             self.delta_time = t_B - t_A
             self.measure_count += 1
-            self.last_update = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
             
+            # 记录日志，包含音频文件信息
             log_entry = {
                 "time": self.last_update,
                 "level": "OK",
-                "msg": f"ΔT={t_B-t_A:.3f}s ({delta_samples}样本)",
+                "msg": f"测量完成 ΔT={t_B-t_A:.3f}s",
                 "audio_file": audio_file
             }
             self.logs.insert(0, log_entry)
@@ -63,10 +61,13 @@ class TargetState:
                 self.logs.pop()
     
     def update_distance(self, distance, raw_distance, time_str):
+        """更新来自Anchor的距离数据"""
         with self._lock:
             self.distance = distance
             self.raw_distance = raw_distance
+            self.last_update = time_str
             
+            # 更新历史记录
             self.distance_history.insert(0, {
                 "time": time_str,
                 "distance": distance,
@@ -88,7 +89,7 @@ class TargetState:
     def add_log(self, level, msg, audio_file=None):
         with self._lock:
             self.logs.insert(0, {
-                "time": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
                 "level": level,
                 "msg": msg,
                 "audio_file": audio_file
@@ -128,11 +129,53 @@ def get_status():
 
 @app.route('/api/audio/<filename>')
 def get_audio(filename):
+    """提供音频文件下载/播放"""
     audio_path = os.path.join('debug_audio', filename)
     if os.path.exists(audio_path):
         return send_file(audio_path, mimetype='audio/wav')
     else:
         abort(404, description="Audio file not found")
+
+@app.route('/api/analysis/<filename>')
+def get_analysis(filename):
+    """获取或生成分析图像"""
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    audio_path = os.path.join('debug_audio', filename)
+    
+    if not os.path.exists(audio_path):
+        abort(404, description="Audio file not found")
+    
+    if not os.path.exists(png_path):
+        try:
+            os.makedirs('debug_png', exist_ok=True)
+            
+            from visualize import visualize_target_audio
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            visualize_target_audio(audio_path, png_path)
+            plt.close('all')
+            
+        except Exception as e:
+            logger.error(f"Analysis generation failed: {e}")
+            abort(500, description=f"Failed to generate analysis: {str(e)}")
+    
+    if os.path.exists(png_path):
+        return send_file(png_path, mimetype='image/png')
+    else:
+        abort(500, description="Failed to generate analysis image")
+
+@app.route('/api/check_analysis/<filename>')
+def check_analysis(filename):
+    """检查分析图像是否存在"""
+    png_filename = filename.replace('.wav', '_analysis.png')
+    png_path = os.path.join('debug_png', png_filename)
+    return jsonify({
+        "exists": os.path.exists(png_path),
+        "png_filename": png_filename
+    })
 
 def run_web_server():
     app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
@@ -145,44 +188,31 @@ class TargetDevice:
         self.net = TargetClient()
         self.input_device_index = None
         self.output_device_index = None
+        self.last_audio_file = None
         
         self._find_devices()
         
         self.chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
         self.chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
         
-        logger.info("初始化音频流（阻塞模式，精确同步）...")
-        state.add_log("INFO", "初始化音频流...")
+        logger.info("正在初始化长效音频流...")
+        state.add_log("INFO", "正在初始化音频流...")
         
         self.stream_out = self.audio.open(
-            format=pyaudio.paFloat32, 
-            channels=CHANNELS, 
-            rate=SAMPLE_RATE,
-            output=True, 
-            output_device_index=self.output_device_index,
-            frames_per_buffer=CHUNK_SIZE
+            format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+            output=True, output_device_index=self.output_device_index
         )
         
         self.stream_in = self.audio.open(
-            format=pyaudio.paFloat32, 
-            channels=CHANNELS, 
-            rate=SAMPLE_RATE,
-            input=True, 
-            input_device_index=self.input_device_index,
+            format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
+            input=True, input_device_index=self.input_device_index,
             frames_per_buffer=CHUNK_SIZE
         )
         
-        # 预热音频流
-        silence = np.zeros(CHUNK_SIZE, dtype=np.float32)
-        for _ in range(5):
-            self.stream_out.write(silence.tobytes())
-            try:
-                self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
-            except:
-                pass
-        
-        logger.info("音频流预热完成")
-        state.add_log("OK", "音频流已就绪")
+        self.stream_out.write(np.zeros(CHUNK_SIZE, dtype=np.float32).tobytes())
+        self.stream_in.start_stream()
+        logger.info("音频流已锁定，等待指令...")
+        state.add_log("OK", "音频流已锁定")
 
     def _find_devices(self):
         info = self.audio.get_host_api_info_by_index(0)
@@ -192,9 +222,25 @@ class TargetDevice:
                 self.input_device_index = i
             if dev.get('maxOutputChannels') > 0 and self.output_device_index is None:
                 self.output_device_index = i
-        logger.info(f"Audio Devices: In={self.input_device_index} Out={self.output_device_index}")
+        logger.info(f"Using Devices: In={self.input_device_index} Out={self.output_device_index}")
+
+    def _flush_input(self):
+        try:
+            if self.stream_in.get_read_available() > 0:
+                to_read = self.stream_in.get_read_available()
+                self.stream_in.read(to_read, exception_on_overflow=False)
+        except:
+            pass
+
+    def _play_delayed_B_thread(self):
+        time.sleep(1.5)
+        try:
+            self.stream_out.write(self.chirp_B.tobytes())
+        except Exception as e:
+            logger.error(f"Play Error: {e}")
 
     def loop(self):
+        frames_to_record = int(SAMPLE_RATE * 2.5)
         state.measuring = True
         
         while True:
@@ -204,91 +250,81 @@ class TargetDevice:
             
             cmd = msg.get('cmd')
             
+            # 处理距离更新消息
             if cmd == 'DISTANCE':
                 distance = msg.get('distance')
                 raw_distance = msg.get('raw_distance')
                 time_str = msg.get('time', datetime.datetime.now().strftime("%H:%M:%S"))
                 state.update_distance(distance, raw_distance, time_str)
+                state.add_log("OK", f"距离更新: {distance:.3f}m")
                 continue
             
             if cmd != 'START': 
                 continue
 
-            try:
-                # 核心改进：使用样本计数代替时间延迟
-                recorded_buffer = np.zeros(RECORD_DURATION_SAMPLES, dtype=np.float32)
-                sample_idx = 0
-                chirp_played = False
-                
-                while sample_idx < RECORD_DURATION_SAMPLES:
-                    chunk_size = min(CHUNK_SIZE, RECORD_DURATION_SAMPLES - sample_idx)
-                    
-                    # 在精确位置播放 Chirp B
-                    if not chirp_played and sample_idx >= CHIRP_B_DELAY_SAMPLES:
-                        play_buffer = np.zeros(CHUNK_SIZE, dtype=np.float32)
-                        chirp_start_in_chunk = CHIRP_B_DELAY_SAMPLES - (sample_idx - chunk_size)
-                        chirp_end = min(len(self.chirp_B), CHUNK_SIZE - chirp_start_in_chunk)
-                        play_buffer[chirp_start_in_chunk:chirp_start_in_chunk + chirp_end] = self.chirp_B[:chirp_end]
-                        self.stream_out.write(play_buffer.tobytes())
-                        chirp_played = True
-                    else:
-                        self.stream_out.write(np.zeros(chunk_size, dtype=np.float32).tobytes())
-                    
-                    # 录音
-                    try:
-                        audio_data = self.stream_in.read(chunk_size, exception_on_overflow=False)
-                        chunk_array = np.frombuffer(audio_data, dtype=np.float32)
-                        recorded_buffer[sample_idx:sample_idx + len(chunk_array)] = chunk_array
-                        sample_idx += len(chunk_array)
-                    except Exception as e:
-                        logger.error(f"Read error: {e}")
-                        sample_idx += chunk_size
+            state.add_log("INFO", "收到 START 指令")
 
-                # 信号检测
-                t_A, corr_A = find_chirp_position(recorded_buffer, self.chirp_A, SAMPLE_RATE)
-                t_B, corr_B = find_chirp_position(recorded_buffer, self.chirp_B, SAMPLE_RATE)
+            try:
+                self._flush_input()
                 
-                # 计算样本数差（整数，更精确）
-                p_A = int(t_A * SAMPLE_RATE)
-                p_B = int(t_B * SAMPLE_RATE)
-                delta_samples = p_B - p_A
+                threading.Thread(target=self._play_delayed_B_thread).start()
                 
-                # 保存音频
+                buffer = []
+                total_read = 0
+                
+                while total_read < frames_to_record:
+                    data = self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
+                    buffer.append(data)
+                    total_read += CHUNK_SIZE
+
+                full_buffer = np.frombuffer(b''.join(buffer), dtype=np.float32)
+                full_buffer = full_buffer[:frames_to_record]
+
+                t_A, corr_A = find_chirp_position(full_buffer, self.chirp_A, SAMPLE_RATE)
+                t_B, corr_B = find_chirp_position(full_buffer, self.chirp_B, SAMPLE_RATE)
+                
+                delta_samples = int((t_B - t_A) * SAMPLE_RATE)
+                
+                # 保存音频文件
                 ts = datetime.datetime.now().strftime("%H%M%S")
                 audio_file = f"target_{ts}.wav"
                 if SAVE_AUDIO:
-                    save_debug_audio(recorded_buffer, audio_file)
+                    save_debug_audio(full_buffer, audio_file)
+                self.last_audio_file = audio_file
                 
                 state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples, audio_file)
                 
-                # 发送精确的样本数差
+                logger.info(f"Process: A={corr_A:.2f}@t={t_A:.3f}s | B={corr_B:.2f}@t={t_B:.3f}s")
+                
                 self.net.send_data({
                     "delta": delta_samples,
                     "corr_A": float(corr_A),
                     "corr_B": float(corr_B)
                 })
-                
-                logger.info(f"测量: A={corr_A:.2f}@{t_A:.3f}s | B={corr_B:.2f}@{t_B:.3f}s | Δ={delta_samples}")
 
             except Exception as e:
                 logger.error(f"Loop Error: {e}")
                 state.add_log("ERROR", str(e))
+                try:
+                    self.stream_in.stop_stream()
+                    self.stream_in.start_stream()
+                except: pass
 
     def run(self):
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
-        logger.info(f"Web界面: http://localhost:{WEB_PORT}")
-        state.add_log("INFO", f"Web端口: {WEB_PORT}")
+        logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
+        state.add_log("INFO", f"Web界面端口: {WEB_PORT}")
         
         while True:
-            state.add_log("INFO", f"连接中: {self.server_ip}...")
+            state.add_log("INFO", f"正在连接 {self.server_ip}...")
             if self.net.connect(self.server_ip, SERVER_PORT):
                 state.set_connected(True, f"{self.server_ip}:{SERVER_PORT}")
                 state.add_log("OK", "已连接锚节点")
                 self.loop()
             else:
                 state.set_connected(False)
-                state.add_log("WARN", "连接失败，重试...")
+                state.add_log("WARN", "连接失败，重试中...")
             time.sleep(2)
 
     def __del__(self):

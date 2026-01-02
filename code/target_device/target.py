@@ -5,6 +5,7 @@ import pyaudio
 import numpy as np
 import datetime
 import os
+import argparse
 from flask import Flask, jsonify, send_from_directory, send_file, abort
 from flask_cors import CORS
 
@@ -180,164 +181,105 @@ def check_analysis(filename):
 def run_web_server():
     app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
 
-
 class TargetDevice:
     def __init__(self, ip):
         self.server_ip = ip
         self.audio = pyaudio.PyAudio()
         self.net = TargetClient()
-        self.input_device_index = None
-        self.output_device_index = None
-        self.last_audio_file = None
-        
-        self._find_devices()
+        self.find_devices()
         
         self.chirp_A = generate_chirp(FREQ_A_START, FREQ_A_END, CHIRP_A_DURATION, SAMPLE_RATE)
         self.chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
         
-        logger.info("正在初始化长效音频流...")
-        state.add_log("INFO", "正在初始化音频流...")
-        
-        self.stream_out = self.audio.open(
-            format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
-            output=True, output_device_index=self.output_device_index
-        )
-        
-        self.stream_in = self.audio.open(
-            format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE,
-            input=True, input_device_index=self.input_device_index,
-            frames_per_buffer=CHUNK_SIZE
-        )
-        
+        logger.info("初始化音频流...")
+        self.stream_out = self.audio.open(output=True, format=pyaudio.paFloat32, channels=1, rate=SAMPLE_RATE, output_device_index=self.output_device_index)
+        self.stream_in = self.audio.open(input=True, format=pyaudio.paFloat32, channels=1, rate=SAMPLE_RATE, input_device_index=self.input_device_index, frames_per_buffer=CHUNK_SIZE)
         self.stream_out.write(np.zeros(CHUNK_SIZE, dtype=np.float32).tobytes())
         self.stream_in.start_stream()
-        logger.info("音频流已锁定，等待指令...")
-        state.add_log("OK", "音频流已锁定")
 
-    def _find_devices(self):
+    def find_devices(self):
+        self.input_device_index = None
+        self.output_device_index = None
         info = self.audio.get_host_api_info_by_index(0)
         for i in range(info.get('deviceCount')):
             dev = self.audio.get_device_info_by_host_api_device_index(0, i)
-            if dev.get('maxInputChannels') > 0 and self.input_device_index is None:
-                self.input_device_index = i
-            if dev.get('maxOutputChannels') > 0 and self.output_device_index is None:
-                self.output_device_index = i
-        logger.info(f"Using Devices: In={self.input_device_index} Out={self.output_device_index}")
+            if dev['maxInputChannels']>0 and self.input_device_index is None: self.input_device_index=i
+            if dev['maxOutputChannels']>0 and self.output_device_index is None: self.output_device_index=i
 
-    def _flush_input(self):
-        try:
-            if self.stream_in.get_read_available() > 0:
-                to_read = self.stream_in.get_read_available()
-                self.stream_in.read(to_read, exception_on_overflow=False)
-        except:
-            pass
-
-    def _play_delayed_B_thread(self):
-        time.sleep(1.5)
+    def _play_B_delayed(self):
+        # 收到Start后，延迟 1.2s 播放 B
+        # 目的是避开 Anchor 发过来的 A，让它们在时间轴上错开
+        time.sleep(1.2) 
         try:
             self.stream_out.write(self.chirp_B.tobytes())
-        except Exception as e:
-            logger.error(f"Play Error: {e}")
+        except: pass
 
     def loop(self):
-        frames_to_record = int(SAMPLE_RATE * 2.5)
-        state.measuring = True
+        # 录音长度需要覆盖：收到A的时间 + 等待时间 + 播放B的时间
+        frames = int(SAMPLE_RATE * 3.0)
         
         while True:
             msg = self.net.recv_cmd()
-            if not msg:
-                continue
+            if not msg: continue
             
-            cmd = msg.get('cmd')
-            
-            # 处理距离更新消息
-            if cmd == 'DISTANCE':
-                distance = msg.get('distance')
-                raw_distance = msg.get('raw_distance')
-                time_str = msg.get('time', datetime.datetime.now().strftime("%H:%M:%S"))
-                state.update_distance(distance, raw_distance, time_str)
-                state.add_log("OK", f"距离更新: {distance:.3f}m")
+            if msg.get('cmd') == 'DISPLAY':
+                print(f"\r Anchor测量结果: {msg.get('dist')}m", end="")
                 continue
-            
-            if cmd != 'START': 
-                continue
-
-            state.add_log("INFO", "收到 START 指令")
-
-            try:
-                self._flush_input()
                 
-                threading.Thread(target=self._play_delayed_B_thread).start()
-                
-                buffer = []
-                total_read = 0
-                
-                while total_read < frames_to_record:
-                    data = self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
-                    buffer.append(data)
-                    total_read += CHUNK_SIZE
-
-                full_buffer = np.frombuffer(b''.join(buffer), dtype=np.float32)
-                full_buffer = full_buffer[:frames_to_record]
-
-                t_A, corr_A = find_chirp_position(full_buffer, self.chirp_A, SAMPLE_RATE)
-                t_B, corr_B = find_chirp_position(full_buffer, self.chirp_B, SAMPLE_RATE)
-                
-                delta_samples = int((t_B - t_A) * SAMPLE_RATE)
-                
-                # 保存音频文件
-                ts = datetime.datetime.now().strftime("%H%M%S")
-                audio_file = f"target_{ts}.wav"
-                if SAVE_AUDIO:
-                    save_debug_audio(full_buffer, audio_file)
-                self.last_audio_file = audio_file
-                
-                state.update_signal(corr_A, corr_B, t_A, t_B, delta_samples, audio_file)
-                
-                logger.info(f"Process: A={corr_A:.2f}@t={t_A:.3f}s | B={corr_B:.2f}@t={t_B:.3f}s")
-                
-                self.net.send_data({
-                    "delta": delta_samples,
-                    "corr_A": float(corr_A),
-                    "corr_B": float(corr_B)
-                })
-
-            except Exception as e:
-                logger.error(f"Loop Error: {e}")
-                state.add_log("ERROR", str(e))
+            if msg.get('cmd') == 'START':
                 try:
-                    self.stream_in.stop_stream()
-                    self.stream_in.start_stream()
-                except: pass
+                    # 1. [关键] 收到 START 后，立即清空缓存
+                    # 确保录音是从“现在”开始的
+                    while self.stream_in.get_read_available() > 0:
+                        self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
+
+                    # 2. 安排播放 (在新线程中，因为录音是阻塞的)
+                    threading.Thread(target=self._play_B_delayed).start()
+                    
+                    # 3. 立即开始录音
+                    buffer = []
+                    total = 0
+                    while total < frames:
+                        data = self.stream_in.read(CHUNK_SIZE, exception_on_overflow=False)
+                        buffer.append(data)
+                        total += CHUNK_SIZE
+                        
+                    full_buffer = np.frombuffer(b''.join(buffer), dtype=np.float32)[:frames]
+                    
+                    # 4. 分析信号
+                    # 找 A (来自 Anchor)
+                    t_A, corr_A = find_chirp_position(full_buffer, self.chirp_A, SAMPLE_RATE)
+                    # 找 B (自己发出的，作为基准)
+                    t_B, corr_B = find_chirp_position(full_buffer, self.chirp_B, SAMPLE_RATE)
+                    
+                    # 必须听到两个声音才能消除误差
+                    if corr_A > 0.25 and corr_B > 0.25:
+                        # Target Delta = 自己发声时间 - 听到对方时间
+                        # 这完全基于录音波形内部的相对距离，与何时开始录音无关
+                        delta_time = t_B - t_A
+                        
+                        self.net.send_data({
+                            "delta_time": delta_time,
+                            "corr_A": float(corr_A),
+                            "corr_B": float(corr_B)
+                        })
+                    else:
+                        logger.warning(f"Target信号丢失 A:{corr_A:.2f} B:{corr_B:.2f} (自听失败或未收到)")
+
+                except Exception as e:
+                    logger.error(e)
+                    try:
+                        self.stream_in.stop_stream()
+                        self.stream_in.start_stream()
+                    except: pass
 
     def run(self):
-        web_thread = threading.Thread(target=run_web_server, daemon=True)
-        web_thread.start()
-        logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
-        state.add_log("INFO", f"Web界面端口: {WEB_PORT}")
-        
         while True:
-            state.add_log("INFO", f"正在连接 {self.server_ip}...")
             if self.net.connect(self.server_ip, SERVER_PORT):
-                state.set_connected(True, f"{self.server_ip}:{SERVER_PORT}")
-                state.add_log("OK", "已连接锚节点")
                 self.loop()
-            else:
-                state.set_connected(False)
-                state.add_log("WARN", "连接失败，重试中...")
-            time.sleep(2)
-
-    def __del__(self):
-        try:
-            self.stream_out.stop_stream()
-            self.stream_out.close()
-            self.stream_in.stop_stream()
-            self.stream_in.close()
-            self.audio.terminate()
-        except: pass
+            time.sleep(1)
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-ip", required=True)
     args = parser.parse_args()

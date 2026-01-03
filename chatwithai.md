@@ -4,7 +4,7 @@
 
 可以看到在anchor前端界面有三个控制按钮：开始测距、停止测距、停止并清空
 
-但是在anchor点击停止并清空后，我的target并没有清空数据，我希望你能帮我完善一下这个逻辑。感谢
+但是在anchor点击停止并清空后，我的target并没有清空了数据，但是折线图仍然存在，我觉得这个逻辑不太对，帮我改一下
 
 请你帮我提供新的代码！
 
@@ -215,6 +215,9 @@ class AnchorState:
 
 state = AnchorState()
 
+# 全局引用，用于在API中访问anchor实例
+anchor_instance = None
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -243,8 +246,21 @@ def stop_measuring():
 @app.route('/api/control/clear', methods=['POST'])
 def clear_and_stop():
     """停止并清空数据"""
+    global anchor_instance
     state.set_measuring(False)
     state.clear_data()
+    
+    # 发送CLEAR命令给Target设备
+    if anchor_instance and anchor_instance.net.client_conn:
+        try:
+            anchor_instance.net.send_cmd({"cmd": "CLEAR"})
+            logger.info("已发送CLEAR命令给Target设备")
+        except Exception as e:
+            logger.error(f"发送CLEAR命令失败: {e}")
+    
+    # 清空anchor的历史记录
+    anchor_instance.history = []
+    
     logger.info("测距已停止并清空数据")
     return jsonify({"success": True, "message": "测距已停止并清空数据"})
 
@@ -401,6 +417,9 @@ class AnchorNode:
         return raw_dist, corr_A, corr_B, t_A, t_B, audio_file
 
     def run(self):
+        global anchor_instance
+        anchor_instance = self
+        
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
@@ -2111,6 +2130,8 @@ class TargetState:
         self.distance = None
         self.raw_distance = None
         self.distance_history = []
+        # 新增：数据清空标记，用于通知前端
+        self.data_version = 0
     
     def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples, audio_file=None):
         with self._lock:
@@ -2171,6 +2192,31 @@ class TargetState:
             if len(self.logs) > 100:
                 self.logs.pop()
     
+    def clear_data(self):
+        """清空所有测距数据"""
+        with self._lock:
+            self.corr_A = 0.0
+            self.corr_B = 0.0
+            self.t_A = 0.0
+            self.t_B = 0.0
+            self.delta_samples = 0
+            self.delta_time = 0.0
+            self.measure_count = 0
+            self.last_update = None
+            self.distance = None
+            self.raw_distance = None
+            self.distance_history = []
+            self.logs = []
+            self.data_version += 1  # 增加版本号，通知前端数据已清空
+            
+            # 添加清空日志
+            self.logs.insert(0, {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": "INFO",
+                "msg": "数据已被锚节点清空",
+                "audio_file": None
+            })
+    
     def get_state(self):
         with self._lock:
             return {
@@ -2188,7 +2234,8 @@ class TargetState:
                 "logs": self.logs,
                 "distance": round(self.distance, 3) if self.distance is not None else None,
                 "raw_distance": round(self.raw_distance, 3) if self.raw_distance is not None else None,
-                "distance_history": self.distance_history
+                "distance_history": self.distance_history,
+                "data_version": self.data_version  # 新增：数据版本号
             }
 
 state = TargetState()
@@ -2323,6 +2370,13 @@ class TargetDevice:
                 continue
             
             cmd = msg.get('cmd')
+            
+            # 处理CLEAR命令 - 清空数据
+            if cmd == 'CLEAR':
+                logger.info("收到CLEAR命令，清空数据")
+                state.clear_data()
+                state.add_log("INFO", "收到锚节点清空指令")
+                continue
             
             # 处理距离更新消息
             if cmd == 'DISTANCE':
@@ -2955,6 +3009,37 @@ if __name__ == "__main__":
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        /* Toast 通知 */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--text);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 3000;
+            opacity: 0;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .toast.info {
+            background: var(--accent);
+        }
+
+        .toast.warning {
+            background: var(--warning);
+        }
     </style>
 </head>
 <body>
@@ -3087,6 +3172,9 @@ if __name__ == "__main__":
     <!-- 隐藏的音频播放器 -->
     <audio id="audioPlayer" style="display: none;"></audio>
 
+    <!-- Toast 通知 -->
+    <div class="toast" id="toast"></div>
+
     <script>
         const API_URL = '/api/status';
         const MAX_CHART_POINTS = 50;
@@ -3100,12 +3188,26 @@ if __name__ == "__main__":
         let selectedPoint = null;
         let currentAudioFile = null;
 
+        // 用于检测数据清空 - 使用 null 表示未初始化
+        let lastDataVersion = null;
+
         // DOM元素
         const tooltip = document.getElementById('tooltip');
         const modalOverlay = document.getElementById('modalOverlay');
         const modalBody = document.getElementById('modalBody');
         const modalTitle = document.getElementById('modalTitle');
         const audioPlayer = document.getElementById('audioPlayer');
+        const toast = document.getElementById('toast');
+
+        // Toast 通知函数
+        function showToast(message, type = 'info') {
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
 
         // 初始化图表
         const ctx = document.getElementById('distanceChart').getContext('2d');
@@ -3368,7 +3470,46 @@ if __name__ == "__main__":
                 });
         }
 
+        // 清空图表数据的函数
+        function clearChartData() {
+            // 清空数组内容（保持引用）
+            chartLabels.length = 0;
+            chartData.length = 0;
+            chartHistory.length = 0;
+            
+            // 重置测量计数
+            lastMeasureCount = 0;
+            
+            // 更新图表显示
+            distanceChart.update('none');
+            
+            // 更新UI显示
+            document.getElementById('chartPoints').textContent = '0 点';
+            document.getElementById('distanceValue').textContent = '--';
+            document.getElementById('distanceValue').classList.add('placeholder');
+            document.getElementById('updateBadge').textContent = '--';
+            
+            // 显示提示
+            showToast('数据已被锚节点清空', 'warning');
+            
+            console.log('[Target] 图表数据已清空');
+        }
+
         function updateUI(data) {
+            // ========== 关键修改：检查数据版本 ==========
+            if (data.data_version !== undefined) {
+                if (lastDataVersion === null) {
+                    // 首次加载，仅记录版本号，不清空
+                    lastDataVersion = data.data_version;
+                    console.log('[Target] 初始化 data_version:', lastDataVersion);
+                } else if (data.data_version !== lastDataVersion) {
+                    // 版本变化，说明后端数据已清空，需要清空前端
+                    console.log('[Target] data_version 变化:', lastDataVersion, '->', data.data_version);
+                    lastDataVersion = data.data_version;
+                    clearChartData();
+                }
+            }
+
             // 连接状态
             const dot = document.getElementById('connDot');
             const text = document.getElementById('connText');
@@ -3400,15 +3541,17 @@ if __name__ == "__main__":
             document.getElementById('deltaSamples').textContent = data.delta_samples.toLocaleString();
             document.getElementById('count').textContent = data.measure_count;
 
-            // 更新图表
+            // 更新图表 - 仅当有新数据时
             if (data.measure_count > lastMeasureCount && data.distance !== null && data.distance !== undefined) {
                 lastMeasureCount = data.measure_count;
                 
-                const latestData = data.distance_history[0];
+                const latestData = data.distance_history && data.distance_history[0] 
+                    ? data.distance_history[0] 
+                    : { time: data.last_update, distance: data.distance };
                 
                 chartLabels.push(data.last_update);
                 chartData.push(data.distance);
-                chartHistory.push(latestData || { time: data.last_update, distance: data.distance });
+                chartHistory.push(latestData);
                 
                 if (chartLabels.length > MAX_CHART_POINTS) {
                     chartLabels.shift();
@@ -3437,6 +3580,9 @@ if __name__ == "__main__":
                     </div>`;
                 }).join('');
                 document.getElementById('logCount').textContent = logsData.length + ' 条';
+            } else {
+                logEl.innerHTML = '<div class="empty-state">等待数据...</div>';
+                document.getElementById('logCount').textContent = '0 条';
             }
         }
 

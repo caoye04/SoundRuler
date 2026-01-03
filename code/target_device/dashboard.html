@@ -711,8 +711,8 @@
         let selectedPoint = null;
         let currentAudioFile = null;
 
-        // 用于检测数据清空
-        let lastDataVersion = 0;
+        // 用于检测数据清空 - 使用 null 表示未初始化
+        let lastDataVersion = null;
 
         // DOM元素
         const tooltip = document.getElementById('tooltip');
@@ -995,23 +995,42 @@
 
         // 清空图表数据的函数
         function clearChartData() {
+            // 清空数组内容（保持引用）
             chartLabels.length = 0;
             chartData.length = 0;
             chartHistory.length = 0;
-            distanceChart.update();
+            
+            // 重置测量计数
             lastMeasureCount = 0;
+            
+            // 更新图表显示
+            distanceChart.update('none');
+            
+            // 更新UI显示
             document.getElementById('chartPoints').textContent = '0 点';
+            document.getElementById('distanceValue').textContent = '--';
+            document.getElementById('distanceValue').classList.add('placeholder');
+            document.getElementById('updateBadge').textContent = '--';
+            
+            // 显示提示
             showToast('数据已被锚节点清空', 'warning');
+            
+            console.log('[Target] 图表数据已清空');
         }
 
         function updateUI(data) {
-            // 检查数据版本，如果版本变化则清空前端图表
-            if (data.data_version !== undefined && data.data_version !== lastDataVersion) {
-                if (lastDataVersion !== 0) {
-                    // 版本变化，清空图表数据
+            // ========== 关键修改：检查数据版本 ==========
+            if (data.data_version !== undefined) {
+                if (lastDataVersion === null) {
+                    // 首次加载，仅记录版本号，不清空
+                    lastDataVersion = data.data_version;
+                    console.log('[Target] 初始化 data_version:', lastDataVersion);
+                } else if (data.data_version !== lastDataVersion) {
+                    // 版本变化，说明后端数据已清空，需要清空前端
+                    console.log('[Target] data_version 变化:', lastDataVersion, '->', data.data_version);
+                    lastDataVersion = data.data_version;
                     clearChartData();
                 }
-                lastDataVersion = data.data_version;
             }
 
             // 连接状态
@@ -1045,15 +1064,17 @@
             document.getElementById('deltaSamples').textContent = data.delta_samples.toLocaleString();
             document.getElementById('count').textContent = data.measure_count;
 
-            // 更新图表
+            // 更新图表 - 仅当有新数据时
             if (data.measure_count > lastMeasureCount && data.distance !== null && data.distance !== undefined) {
                 lastMeasureCount = data.measure_count;
                 
-                const latestData = data.distance_history[0];
+                const latestData = data.distance_history && data.distance_history[0] 
+                    ? data.distance_history[0] 
+                    : { time: data.last_update, distance: data.distance };
                 
                 chartLabels.push(data.last_update);
                 chartData.push(data.distance);
-                chartHistory.push(latestData || { time: data.last_update, distance: data.distance });
+                chartHistory.push(latestData);
                 
                 if (chartLabels.length > MAX_CHART_POINTS) {
                     chartLabels.shift();
@@ -1082,6 +1103,9 @@
                     </div>`;
                 }).join('');
                 document.getElementById('logCount').textContent = logsData.length + ' 条';
+            } else {
+                logEl.innerHTML = '<div class="empty-state">等待数据...</div>';
+                document.getElementById('logCount').textContent = '0 条';
             }
         }
 

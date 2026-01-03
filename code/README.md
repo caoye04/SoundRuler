@@ -1,138 +1,134 @@
- # 📋 BeepBeep 声波测距系统 - 项目说明
+# BeepBeep 声波测距系统
 
-## 🎯 项目简介
-基于 BeepBeep 算法的声波测距系统，通过发送和检测 Chirp 信号实现设备间的距离测量。支持 Windows 和 macOS 双平台。
+基于 BeepBeep 算法的声波测距系统实现，用于《物联网导论》课程大作业。
 
----
+## 项目简介
 
-## 📁 项目结构
+本项目实现了一个基于声波的距离测量系统，使用两个设备（锚节点和目标设备）通过发送和接收 Chirp 信号来测量彼此之间的距离。系统采用 BeepBeep 算法，通过测量信号传播时间差来计算距离，无需严格的时钟同步。
+
 ```
-SoundRuler/
+beepbeep/
+├── anchor.py                 # 锚节点（设备A）主程序
+├── target.py                 # 目标设备（设备B）主程序
 ├── common/
-│   ├── config.py              # 全局配置参数
-│   └── signal_processing.py   # 信号处理核心算法
-├── anchor_node.py             # 锚节点（设备 A）主程序
-├── target_device.py           # 目标设备（设备 B）主程序
-└── debug_audio/               # 调试音频存储目录
+│   ├── config.py            # 配置参数（频率、时长、采样率等）
+│   ├── signal_processing.py # 信号处理函数（Chirp生成、检测、距离计算）
+│   └── visualize.py         # 可视化分析工具
+├── debug_audio/             # 调试音频文件存储目录
+├── debug_png/               # 可视化分析图像存储目录
+└── README.md
 ```
 
----
+## 核心组件
 
-## ⚙️ 核心参数配置
+### 1. 锚节点 (anchor.py)
+- 启动 TCP 服务器等待目标设备连接
+- 发送 Chirp A 信号
+- 接收并检测 Chirp A 和 Chirp B
+- 计算距离并显示结果
 
-### 1. 音频参数 (`config.py`)
-```python
-SAMPLE_RATE = 44100           # 采样率 44.1 kHz
-CHUNK_SIZE = 2048             # 音频缓冲区大小
-CHIRP_DURATION = 0.8          # Chirp 信号时长
-CHIRP_B_DELAY = 2.5           # Chirp B 延迟时间
-TOTAL_RECORD_TIME = 9.0       # 总录音时长
+### 2. 目标设备 (target.py)
+- 连接到锚节点
+- 接收 Chirp A 后延迟发送 Chirp B
+- 检测两个 Chirp 信号
+- 将时间差数据发送给锚节点
+
+### 3. 信号处理 (signal_processing.py)
+- **generate_chirp()**: 生成线性/对数调频信号
+- **find_chirp_position()**: 使用归一化互相关（NCC）检测 Chirp 位置
+- **calculate_distance_beepbeep()**: BeepBeep 距离计算
+- **save_debug_audio()**: 保存调试音频
+
+### 4. 配置文件 (config.py)
+- 网络参数（IP、端口）
+- 音频参数（采样率、通道数）
+- Chirp 参数（频率范围、时长）
+- 物理参数（声速、设备偏移）
+
+### 5. 可视化工具 (visualize.py)
+- 完整录音波形分析
+- 频谱图（时频分析）
+- 能量包络检测
+- Chirp 局部放大对比
+- 参考信号对比
+
+## 环境要求
+
+### 硬件
+- 两台计算机（或笔记本）
+- 各配备麦克风和扬声器
+- 网络连接（TCP）
+
+### 软件依赖
+```
+python >= 3.7
+numpy
+scipy
+pyaudio
+matplotlib (用于可视化分析)
 ```
 
-### 2. 频率范围
-```python
-FREQ_A_START = 2000 Hz        # Chirp A 起始频率
-FREQ_A_END = 4000 Hz          # Chirp A 结束频率
-FREQ_B_START = 4500 Hz        # Chirp B 起始频率
-FREQ_B_END = 6500 Hz          # Chirp B 结束频率
-```
-
-### 3. 检测参数
-```python
-MIN_CORRELATION_THRESHOLD = 0.3    # 最小相关度阈值
-SEARCH_WINDOW_START = 0.1 s        # 搜索窗口起始
-SEARCH_WINDOW_END = 8.0 s          # 搜索窗口结束
-```
-
-### 4. 系统延迟补偿
-```python
-SOUND_SPEED = 343.0 m/s            # 声速（20°C）
-SYSTEM_DELAY_OFFSET = 0.0 s        # 系统延迟偏移量（需校准）
-DEVICE_OFFSET_A = 0.0 m            # 设备 A 偏移
-DEVICE_OFFSET_B = 0.0 m            # 设备 B 偏移
-```
-
----
-
-## 🚀 使用方法
-
-### 1. 安装依赖
+安装依赖：
 ```bash
-pip install pyaudio numpy scipy
+pip install numpy scipy pyaudio matplotlib
 ```
 
-### 2. 启动锚节点（设备 A）
+## 使用方法
+
+### 1. 配置参数
+
+编辑 `common/config.py` 设置：
+- 服务器 IP 地址
+- Chirp 频率范围
+- 信号时长
+- 录音时长
+
+### 2. 启动锚节点
+
+在设备 A 上运行：
 ```bash
-python anchor_node.py
+python anchor.py
 ```
 
-### 3. 启动目标设备（设备 B）
+### 3. 启动目标设备
+
+在设备 B 上运行：
 ```bash
-python target_device.py --server-ip <锚节点IP地址>
+python target.py --server-ip <锚节点IP地址>
 ```
 
-### 4. 开始测量
-系统会自动进行倒计时同步，然后开始测距。
+### 4. 查看结果
 
----
+锚节点会显示：
+- 检测到的 Chirp 时间
+- 相关度
+- 计算出的距离
+- 统计信息（平均值、标准差）
 
-## 🔧 已完成的优化（当前版本）
+### 5. 可视化分析（可选）
 
-### ✅ Step 1: 信号生成优化
-- **改进点**：
-  - 使用 Tukey 窗函数（alpha=0.2）替代 Hann 窗
-  - 添加 50ms 尾部静音减少混响干扰
-  - 信号归一化到 0.9 避免削波
-
-- **效果**：
-  - ✅ 标准差从 0.7m → **0.14m**（降低 80%）
-  - ✅ Chirp B 相关度从 0.33 → **0.47**（提升 42%）
-  - ✅ 检测成功率 100%
-
-
----
-
-## 📊 当前性能指标（Windows 平台）
-
-| 测量次数 | Chirp A 时间 (s) | Chirp B 时间 (s) | Δt_A (s) | Δt_B (s) | 测距结果 (m) | 相关度 A | 相关度 B |
-|----------|------------------|------------------|----------|----------|--------------|-----------|-----------|
-| 第 1 次   | 0.523            | 3.404            | 2.881396 | 2.876970 | **0.759**    | 0.610     | 0.528     |
-| 第 2 次   | 0.519            | 3.867            | 3.348586 | 3.344507 | **0.700**    | 0.611     | 0.500     |
-| 第 3 次   | 0.523            | 3.796            | 3.272967 | 3.268530 | **0.761**    | 0.612     | 0.519     |
-| 第 4 次   | 0.521            | 3.730            | 3.208675 | 3.203936 | **0.813**    | 0.636     | 0.445     |
-
-距离真值从电脑中心到电脑中心70cm左右，因为不知道麦克风在哪所以可能有偏差。
-
----
-
-## 📈 校准方法
-
-### 1. 单点校准（推荐）
-```python
-# 测量已知距离（如 1.0m）10 次，计算平均误差
-measured_avg = 1.15 m
-true_distance = 1.0 m
-
-# 计算系统延迟偏移
-SYSTEM_DELAY_OFFSET = (measured_avg - true_distance) / SOUND_SPEED
-# 约 0.00044 s
+运行可视化工具分析录音质量：
+```bash
+python common/visualize.py
 ```
 
-### 2. 多点线性拟合（更精确）
-测量 1m、2m、3m 三个距离，拟合线性关系：
-```python
-# 使用最小二乘法拟合
-from scipy.stats import linregress
-slope, intercept = linregress(true_distances, measured_distances)
+会在 `debug_png/` 目录生成分析图像，包含：
+- 时域波形
+- 频谱图
+- 能量包络
+- 检测位置标注
+- 参考信号对比
 
-# 修正公式
-calibrated_distance = (raw_distance - intercept) / slope
-```
+## 调试工具
 
----
-## 1226更新
+### 音频录音
+设置 `SAVE_AUDIO = True` 后，录音文件会保存在 `debug_audio/` 目录：
+- `anchor_HHMMSS.wav`: 锚节点录音
+- `target_HHMMSS.wav`: 目标设备录音
 
-今天重新进行了测试，发现之前连续得出稳定结果可能是运气问题。
-现在的情况是：有时候结果会十分稳定接近真值，有时候结果会飘，但整体趋势是对的。
-近距离（70-80cm）时有集中趋势：测出的结果一个接近真值，一个明显偏小(0.25m左右)，我觉得应该是识别到了其他的峰，需要改进一下波峰识别算法。
-中远距离（1.8m）时也测出过十分稳定的结果，在2m左右连续5次以上，误差不超过5cm；但是更多的情况是结果比较乱，有一部分集中在3.8m，2.7m、2.4m的也有。
+### 可视化分析
+运行 `visualize.py` 生成分析图像，帮助诊断：
+- 信号是否被正确检测
+- 检测位置是否准确
+- 噪声水平
+- 频谱特性

@@ -532,6 +532,37 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        /* Toast 通知 */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--text);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 3000;
+            opacity: 0;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .toast.info {
+            background: var(--accent);
+        }
+
+        .toast.warning {
+            background: var(--warning);
+        }
     </style>
 </head>
 <body>
@@ -664,6 +695,9 @@
     <!-- 隐藏的音频播放器 -->
     <audio id="audioPlayer" style="display: none;"></audio>
 
+    <!-- Toast 通知 -->
+    <div class="toast" id="toast"></div>
+
     <script>
         const API_URL = '/api/status';
         const MAX_CHART_POINTS = 50;
@@ -677,12 +711,26 @@
         let selectedPoint = null;
         let currentAudioFile = null;
 
+        // 用于检测数据清空
+        let lastDataVersion = 0;
+
         // DOM元素
         const tooltip = document.getElementById('tooltip');
         const modalOverlay = document.getElementById('modalOverlay');
         const modalBody = document.getElementById('modalBody');
         const modalTitle = document.getElementById('modalTitle');
         const audioPlayer = document.getElementById('audioPlayer');
+        const toast = document.getElementById('toast');
+
+        // Toast 通知函数
+        function showToast(message, type = 'info') {
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
 
         // 初始化图表
         const ctx = document.getElementById('distanceChart').getContext('2d');
@@ -945,7 +993,27 @@
                 });
         }
 
+        // 清空图表数据的函数
+        function clearChartData() {
+            chartLabels.length = 0;
+            chartData.length = 0;
+            chartHistory.length = 0;
+            distanceChart.update();
+            lastMeasureCount = 0;
+            document.getElementById('chartPoints').textContent = '0 点';
+            showToast('数据已被锚节点清空', 'warning');
+        }
+
         function updateUI(data) {
+            // 检查数据版本，如果版本变化则清空前端图表
+            if (data.data_version !== undefined && data.data_version !== lastDataVersion) {
+                if (lastDataVersion !== 0) {
+                    // 版本变化，清空图表数据
+                    clearChartData();
+                }
+                lastDataVersion = data.data_version;
+            }
+
             // 连接状态
             const dot = document.getElementById('connDot');
             const text = document.getElementById('connText');

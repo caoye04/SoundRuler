@@ -123,6 +123,9 @@ class AnchorState:
 
 state = AnchorState()
 
+# 全局引用，用于在API中访问anchor实例
+anchor_instance = None
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -151,8 +154,21 @@ def stop_measuring():
 @app.route('/api/control/clear', methods=['POST'])
 def clear_and_stop():
     """停止并清空数据"""
+    global anchor_instance
     state.set_measuring(False)
     state.clear_data()
+    
+    # 发送CLEAR命令给Target设备
+    if anchor_instance and anchor_instance.net.client_conn:
+        try:
+            anchor_instance.net.send_cmd({"cmd": "CLEAR"})
+            logger.info("已发送CLEAR命令给Target设备")
+        except Exception as e:
+            logger.error(f"发送CLEAR命令失败: {e}")
+    
+    # 清空anchor的历史记录
+    anchor_instance.history = []
+    
     logger.info("测距已停止并清空数据")
     return jsonify({"success": True, "message": "测距已停止并清空数据"})
 
@@ -309,6 +325,9 @@ class AnchorNode:
         return raw_dist, corr_A, corr_B, t_A, t_B, audio_file
 
     def run(self):
+        global anchor_instance
+        anchor_instance = self
+        
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")

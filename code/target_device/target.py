@@ -37,6 +37,8 @@ class TargetState:
         self.distance = None
         self.raw_distance = None
         self.distance_history = []
+        # 新增：数据清空标记，用于通知前端
+        self.data_version = 0
     
     def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples, audio_file=None):
         with self._lock:
@@ -97,6 +99,31 @@ class TargetState:
             if len(self.logs) > 100:
                 self.logs.pop()
     
+    def clear_data(self):
+        """清空所有测距数据"""
+        with self._lock:
+            self.corr_A = 0.0
+            self.corr_B = 0.0
+            self.t_A = 0.0
+            self.t_B = 0.0
+            self.delta_samples = 0
+            self.delta_time = 0.0
+            self.measure_count = 0
+            self.last_update = None
+            self.distance = None
+            self.raw_distance = None
+            self.distance_history = []
+            self.logs = []
+            self.data_version += 1  # 增加版本号，通知前端数据已清空
+            
+            # 添加清空日志
+            self.logs.insert(0, {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": "INFO",
+                "msg": "数据已被锚节点清空",
+                "audio_file": None
+            })
+    
     def get_state(self):
         with self._lock:
             return {
@@ -114,7 +141,8 @@ class TargetState:
                 "logs": self.logs,
                 "distance": round(self.distance, 3) if self.distance is not None else None,
                 "raw_distance": round(self.raw_distance, 3) if self.raw_distance is not None else None,
-                "distance_history": self.distance_history
+                "distance_history": self.distance_history,
+                "data_version": self.data_version  # 新增：数据版本号
             }
 
 state = TargetState()
@@ -249,6 +277,13 @@ class TargetDevice:
                 continue
             
             cmd = msg.get('cmd')
+            
+            # 处理CLEAR命令 - 清空数据
+            if cmd == 'CLEAR':
+                logger.info("收到CLEAR命令，清空数据")
+                state.clear_data()
+                state.add_log("INFO", "收到锚节点清空指令")
+                continue
             
             # 处理距离更新消息
             if cmd == 'DISTANCE':

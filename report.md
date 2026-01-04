@@ -308,7 +308,7 @@ Target:  ────录音开始───────────────�
 - 统计数据面板：显示测量抖动、测量次数、刷新率（FPS）等指标
 - 历史记录列表：可滚动查看历史测量记录，支持点击播放对应音频或查看分析图像
 
-<img src="pic4rep/2.png" style="zoom:40%;" />
+<img src="pic4rep/2.png" style="zoom:30%;" />
 
 **目标设备界面功能**
 
@@ -318,7 +318,7 @@ Target:  ────录音开始───────────────�
 - 分析数据面板：展示$ \Delta T_B $、样本差、测量次数等本地计算结果
 - 运行日志：实时显示系统运行状态，支持点击查看音频分析
 
-<img src="pic4rep/1.png" style="zoom:40%;" />
+<img src="pic4rep/1.png" style="zoom:30%;" />
 
 > 例图：在某个测试实验中的
 
@@ -330,11 +330,11 @@ Target:  ────录音开始───────────────�
 - Chirp A局部放大：精细展示Chirp A区域波形及检测位置
 - Chirp B局部放大：精细展示Chirp B区域波形及检测位置
 
-<img src="pic4rep/3.png" style="zoom:40%;" />
+<img src="pic4rep/3.png" style="zoom:20%;" />
 
 > 图像分析入口例图：点击某一个点之后就能直接点“分析图像”获取该点的分析
 
-<img src="pic4rep/4.png" style="zoom:40%;" />
+<img src="pic4rep/4.png" style="zoom:30%;" />
 
 > 分析图象结果例图：如图所示，可以看到这一次信号的非常详细的信息
 
@@ -364,7 +364,7 @@ Target:  ────录音开始───────────────�
 
 在紫荆学生宿舍，木质桌子表面约0.5m的距离下，测试==16次==
 
-<img src="pic4rep/5.jpg" style="zoom:25%;" /><img src="pic4rep/6.jpg" style="zoom:25%;" />
+<img src="pic4rep/5.jpg" style="zoom:16%;" /><img src="pic4rep/6.jpg" style="zoom:16%;" />
 
 #### b. 实验结果
 
@@ -420,7 +420,7 @@ Target:  ────录音开始───────────────�
 
 在紫荆学生宿舍，木质桌子表面约0.5m的距离下，测试==15次==
 
-<img src="pic4rep/8.jpg" style="zoom:25%;" /><img src="pic4rep/9.jpg" style="zoom:25%;" />
+<img src="pic4rep/8.jpg" style="zoom:16%;" /><img src="pic4rep/9.jpg" style="zoom:16%;" />
 
 #### b. 实验结果
 
@@ -475,7 +475,7 @@ Target:  ────录音开始───────────────�
 
 在小卧室，一台电脑悬空一台电脑置于桌子上，进行测试，一共测试17次
 
-<img src="pic4rep/11.jpg" style="zoom:25%;" /><img src="pic4rep/12.jpg" style="zoom:25%;" />
+<img src="pic4rep/11.jpg" style="zoom:16%;" /><img src="pic4rep/12.jpg" style="zoom:16%;" />
 
 #### b. 实验结果
 
@@ -532,7 +532,7 @@ Target:  ────录音开始───────────────�
 
 在客厅，用饮料箱子和书本垫到同高，相距4m准确距离，一共测试17次
 
-<img src="pic4rep/14.jpg" style="zoom:25%;" /><img src="pic4rep/15.jpg" style="zoom:25%;" />
+<img src="pic4rep/14.jpg" style="zoom:16%;" /><img src="pic4rep/15.jpg" style="zoom:16%;" />
 
 #### b. 实验结果
 
@@ -589,7 +589,7 @@ Target:  ────录音开始───────────────�
 
 在客厅，用饮料箱子和书本垫到同高，相距7m（5m卷尺+1.5m逗猫棒+0.5m估测距离与调整），一共测试19次
 
-<img src="pic4rep/16.jpg" style="zoom:15%;" /><img src="pic4rep/17.jpg" style="zoom:20%;" /><img src="pic4rep/18.jpg" style="zoom:20%;" />
+<img src="pic4rep/16.jpg" style="zoom:10.5%;" /><img src="pic4rep/17.jpg" style="zoom:14%;" /><img src="pic4rep/18.jpg" style="zoom:14%;" />
 
 #### b. 实验结果
 

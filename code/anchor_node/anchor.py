@@ -5,6 +5,7 @@ import pyaudio
 import numpy as np
 import datetime
 import os
+import json
 import subprocess
 from flask import Flask, jsonify, send_from_directory, request, send_file, abort
 from flask_cors import CORS
@@ -19,9 +20,132 @@ SAVE_AUDIO = True
 DISTANCE_OFFSET = 0.0
 WEB_PORT = 8080
 
+# === JSON记录配置 ===
+MEASUREMENTS_FILE = "measurements.json"
+
 # === Flask 应用 ===
 app = Flask(__name__, static_folder='.')
 CORS(app)
+
+# === 测量结果记录器 ===
+class MeasurementRecorder:
+    """测量结果JSON记录器"""
+    def __init__(self, filepath=MEASUREMENTS_FILE):
+        self.filepath = filepath
+        self._lock = threading.Lock()
+        self._ensure_file_exists()
+    
+    def _ensure_file_exists(self):
+        """确保JSON文件存在"""
+        if not os.path.exists(self.filepath):
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "description": "SoundRuler BeepBeep 测距记录",
+                    "created_at": datetime.datetime.now().isoformat(),
+                    "measurements": []
+                }, f, ensure_ascii=False, indent=2)
+            logger.info(f"创建测量记录文件: {self.filepath}")
+    
+    def record(self, distance, raw_distance, corr_A, corr_B, t_A, t_B, 
+               audio_file=None, extra_info=None):
+        """
+        记录一次测量结果
+        
+        Args:
+            distance: 滤波后的距离 (m)
+            raw_distance: 原始距离 (m)
+            corr_A: Chirp A 相关度
+            corr_B: Chirp B 相关度
+            t_A: Chirp A 检测时间 (s)
+            t_B: Chirp B 检测时间 (s)
+            audio_file: 关联的音频文件名 (可选)
+            extra_info: 额外信息字典 (可选)
+        """
+        record = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "distance_m": round(float(distance), 4),
+            "raw_distance_m": round(float(raw_distance), 4),
+            "delta_t_s": round(float(t_B - t_A), 6),
+            "corr_A": round(float(corr_A), 4),
+            "corr_B": round(float(corr_B), 4),
+            "t_A_s": round(float(t_A), 6),
+            "t_B_s": round(float(t_B), 6),
+        }
+        
+        if audio_file:
+            record["audio_file"] = audio_file
+        
+        if extra_info:
+            record["extra"] = extra_info
+        
+        with self._lock:
+            try:
+                # 读取现有数据
+                with open(self.filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # 追加新记录
+                data["measurements"].append(record)
+                data["last_updated"] = datetime.datetime.now().isoformat()
+                data["total_count"] = len(data["measurements"])
+                
+                # 写回文件
+                with open(self.filepath, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                
+                logger.debug(f"记录测量: {distance:.3f}m")
+                return True
+                
+            except Exception as e:
+                logger.error(f"记录测量失败: {e}")
+                return False
+    
+    def clear(self):
+        """清空所有测量记录"""
+        with self._lock:
+            try:
+                with open(self.filepath, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        "description": "SoundRuler BeepBeep 测距记录",
+                        "created_at": datetime.datetime.now().isoformat(),
+                        "measurements": []
+                    }, f, ensure_ascii=False, indent=2)
+                logger.info("测量记录已清空")
+                return True
+            except Exception as e:
+                logger.error(f"清空记录失败: {e}")
+                return False
+    
+    def get_all(self):
+        """获取所有测量记录"""
+        with self._lock:
+            try:
+                with open(self.filepath, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"读取记录失败: {e}")
+                return None
+    
+    def get_statistics(self):
+        """获取统计信息"""
+        data = self.get_all()
+        if not data or not data.get("measurements"):
+            return None
+        
+        measurements = data["measurements"]
+        distances = [m["distance_m"] for m in measurements]
+        
+        return {
+            "count": len(distances),
+            "mean_m": round(np.mean(distances), 4),
+            "std_m": round(np.std(distances), 4),
+            "min_m": round(np.min(distances), 4),
+            "max_m": round(np.max(distances), 4),
+            "median_m": round(np.median(distances), 4)
+        }
+
+# 创建全局记录器实例
+measurement_recorder = MeasurementRecorder()
 
 # === 全局状态（线程安全）===
 class AnchorState:
@@ -123,6 +247,9 @@ class AnchorState:
 
 state = AnchorState()
 
+# 全局引用，用于在API中访问anchor实例
+anchor_instance = None
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -131,7 +258,43 @@ def index():
 def get_status():
     return jsonify(state.get_state())
 
-# === 新增：控制 API ===
+# === 新增：测量记录 API ===
+@app.route('/api/measurements')
+def get_measurements():
+    """获取所有测量记录"""
+    data = measurement_recorder.get_all()
+    if data:
+        return jsonify(data)
+    return jsonify({"error": "无法读取记录"}), 500
+
+@app.route('/api/measurements/stats')
+def get_measurements_stats():
+    """获取测量统计信息"""
+    stats = measurement_recorder.get_statistics()
+    if stats:
+        return jsonify(stats)
+    return jsonify({"error": "无数据"}), 404
+
+@app.route('/api/measurements/clear', methods=['POST'])
+def clear_measurements():
+    """清空测量记录"""
+    if measurement_recorder.clear():
+        return jsonify({"success": True, "message": "测量记录已清空"})
+    return jsonify({"success": False, "message": "清空失败"}), 500
+
+@app.route('/api/measurements/download')
+def download_measurements():
+    """下载测量记录JSON文件"""
+    if os.path.exists(MEASUREMENTS_FILE):
+        return send_file(
+            MEASUREMENTS_FILE,
+            mimetype='application/json',
+            as_attachment=True,
+            download_name=f'measurements_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+        )
+    return jsonify({"error": "文件不存在"}), 404
+
+# === 控制 API ===
 @app.route('/api/control/start', methods=['POST'])
 def start_measuring():
     """开始测距"""
@@ -151,8 +314,25 @@ def stop_measuring():
 @app.route('/api/control/clear', methods=['POST'])
 def clear_and_stop():
     """停止并清空数据"""
+    global anchor_instance
     state.set_measuring(False)
     state.clear_data()
+    
+    # 可选：同时清空JSON记录
+    # measurement_recorder.clear()
+    
+    # 发送CLEAR命令给Target设备
+    if anchor_instance and anchor_instance.net.client_conn:
+        try:
+            anchor_instance.net.send_cmd({"cmd": "CLEAR"})
+            logger.info("已发送CLEAR命令给Target设备")
+        except Exception as e:
+            logger.error(f"发送CLEAR命令失败: {e}")
+    
+    # 清空anchor的历史记录
+    if anchor_instance:
+        anchor_instance.history = []
+    
     logger.info("测距已停止并清空数据")
     return jsonify({"success": True, "message": "测距已停止并清空数据"})
 
@@ -309,6 +489,9 @@ class AnchorNode:
         return raw_dist, corr_A, corr_B, t_A, t_B, audio_file
 
     def run(self):
+        global anchor_instance
+        anchor_instance = self
+        
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
@@ -343,6 +526,17 @@ class AnchorNode:
                     median_dist = np.median(self.history)
                     
                     state.update(raw, median_dist, corr_A, corr_B, t_A, t_B, self.history, audio_file)
+                    
+                    # === 新增：记录到JSON文件 ===
+                    measurement_recorder.record(
+                        distance=median_dist,
+                        raw_distance=raw,
+                        corr_A=corr_A,
+                        corr_B=corr_B,
+                        t_A=t_A,
+                        t_B=t_B,
+                        audio_file=audio_file
+                    )
                     
                     self.net.send_cmd({
                         "cmd": "DISTANCE",

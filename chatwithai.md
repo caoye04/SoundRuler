@@ -1,10 +1,8 @@
 我正在完成我的物联网大作业——声波测距程序。
 
-下面是我的作业要求和目前代码。我现在希望做一些以下改动：
+下面是我的作业要求和目前代码，我想稍微修改一下，即记录每次输出的真实测试结果与一些相关数据，以简洁的形式存在一个json文件中即可，没有的话就创建它
 
-可以看出来我的代码是一打开并连接上就会自动开始测距与记录。我希望在anchor前端界面做三个控制按钮：开始测距、停止测距、停止并清空
-
-请你帮我提供新的代码！
+帮我给出完整的代码
 
 ## 作业要求与相关内容
 
@@ -130,6 +128,8 @@ class AnchorState:
         self.last_update = None
         self.fps = 0.0
         self._timestamps = []
+        # 新增：测距控制状态
+        self.measuring = False  # 是否正在测距
     
     def update(self, raw_dist, median_dist, corr_A, corr_B, t_A, t_B, history, audio_file=None):
         with self._lock:
@@ -143,7 +143,7 @@ class AnchorState:
             self.measure_count += 1
             self.last_update = datetime.datetime.now().strftime("%H:%M:%S")
             
-            # 更新历史记录 - 增加保存数量，添加音频文件名
+            # 更新历史记录
             self.history.insert(0, {
                 "time": self.last_update,
                 "distance": round(median_dist, 3),
@@ -152,7 +152,7 @@ class AnchorState:
                 "corr_B": round(corr_B, 3),
                 "t_A": round(t_A, 4),
                 "t_B": round(t_B, 4),
-                "audio_file": audio_file  # 新增：关联的音频文件名
+                "audio_file": audio_file
             })
             if len(self.history) > 100:
                 self.history.pop()
@@ -167,10 +167,35 @@ class AnchorState:
         with self._lock:
             self.connected = status
     
+    def set_measuring(self, status):
+        with self._lock:
+            self.measuring = status
+    
+    def is_measuring(self):
+        with self._lock:
+            return self.measuring
+    
+    def clear_data(self):
+        """清空所有测距数据"""
+        with self._lock:
+            self.distance = None
+            self.raw_distance = None
+            self.corr_A = 0.0
+            self.corr_B = 0.0
+            self.t_A = 0.0
+            self.t_B = 0.0
+            self.jitter = 0.0
+            self.measure_count = 0
+            self.history = []
+            self.last_update = None
+            self.fps = 0.0
+            self._timestamps = []
+    
     def get_state(self):
         with self._lock:
             return {
                 "connected": self.connected,
+                "measuring": self.measuring,  # 新增
                 "distance": round(self.distance, 3) if self.distance else None,
                 "raw_distance": round(self.raw_distance, 3) if self.raw_distance else None,
                 "corr_A": round(self.corr_A, 3),
@@ -186,6 +211,9 @@ class AnchorState:
 
 state = AnchorState()
 
+# 全局引用，用于在API中访问anchor实例
+anchor_instance = None
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'dashboard.html')
@@ -193,6 +221,44 @@ def index():
 @app.route('/api/status')
 def get_status():
     return jsonify(state.get_state())
+
+# === 新增：控制 API ===
+@app.route('/api/control/start', methods=['POST'])
+def start_measuring():
+    """开始测距"""
+    if not state.connected:
+        return jsonify({"success": False, "message": "目标设备未连接"}), 400
+    state.set_measuring(True)
+    logger.info("测距已开始")
+    return jsonify({"success": True, "message": "测距已开始"})
+
+@app.route('/api/control/stop', methods=['POST'])
+def stop_measuring():
+    """停止测距"""
+    state.set_measuring(False)
+    logger.info("测距已停止")
+    return jsonify({"success": True, "message": "测距已停止"})
+
+@app.route('/api/control/clear', methods=['POST'])
+def clear_and_stop():
+    """停止并清空数据"""
+    global anchor_instance
+    state.set_measuring(False)
+    state.clear_data()
+    
+    # 发送CLEAR命令给Target设备
+    if anchor_instance and anchor_instance.net.client_conn:
+        try:
+            anchor_instance.net.send_cmd({"cmd": "CLEAR"})
+            logger.info("已发送CLEAR命令给Target设备")
+        except Exception as e:
+            logger.error(f"发送CLEAR命令失败: {e}")
+    
+    # 清空anchor的历史记录
+    anchor_instance.history = []
+    
+    logger.info("测距已停止并清空数据")
+    return jsonify({"success": True, "message": "测距已停止并清空数据"})
 
 @app.route('/api/audio/<filename>')
 def get_audio(filename):
@@ -206,30 +272,22 @@ def get_audio(filename):
 @app.route('/api/analysis/<filename>')
 def get_analysis(filename):
     """获取或生成分析图像"""
-    # 从音频文件名生成对应的PNG文件名
     png_filename = filename.replace('.wav', '_analysis.png')
     png_path = os.path.join('debug_png', png_filename)
     audio_path = os.path.join('debug_audio', filename)
     
-    # 检查音频文件是否存在
     if not os.path.exists(audio_path):
         abort(404, description="Audio file not found")
     
-    # 如果PNG不存在，调用visualize生成
     if not os.path.exists(png_path):
         try:
-            # 确保输出目录存在
             os.makedirs('debug_png', exist_ok=True)
-            
-            # 调用visualize模块进行分析
             from visualize import visualize_anchor_audio
             import matplotlib
-            matplotlib.use('Agg')  # 使用非交互式后端
+            matplotlib.use('Agg')
             import matplotlib.pyplot as plt
-            
             visualize_anchor_audio(audio_path, png_path)
             plt.close('all')
-            
         except Exception as e:
             logger.error(f"Analysis generation failed: {e}")
             abort(500, description=f"Failed to generate analysis: {str(e)}")
@@ -266,7 +324,7 @@ class AnchorNode:
         self.chirp_B = generate_chirp(FREQ_B_START, FREQ_B_END, CHIRP_B_DURATION, SAMPLE_RATE)
         
         self.history = []
-        self.last_audio_file = None  # 记录最后保存的音频文件名
+        self.last_audio_file = None
 
         logger.info("正在初始化音频流 (Long-lived Streams)...")
         self.stream_out = self.audio.open(
@@ -355,6 +413,9 @@ class AnchorNode:
         return raw_dist, corr_A, corr_B, t_A, t_B, audio_file
 
     def run(self):
+        global anchor_instance
+        anchor_instance = self
+        
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
         logger.info(f"Web界面已启动: http://localhost:{WEB_PORT}")
@@ -369,6 +430,11 @@ class AnchorNode:
                 continue
 
             state.set_connected(True)
+            
+            # === 关键修改：检查是否正在测距 ===
+            if not state.is_measuring():
+                time.sleep(0.2)  # 未开始测距时，降低CPU占用
+                continue
 
             try:
                 result = self.measure_cycle()
@@ -383,10 +449,8 @@ class AnchorNode:
                     if len(self.history) > 5: self.history.pop(0)
                     median_dist = np.median(self.history)
                     
-                    # 更新全局状态，传入音频文件名
                     state.update(raw, median_dist, corr_A, corr_B, t_A, t_B, self.history, audio_file)
                     
-                    # 将距离发送给Target
                     self.net.send_cmd({
                         "cmd": "DISTANCE",
                         "distance": round(float(median_dist), 3),
@@ -549,6 +613,98 @@ if __name__ == "__main__":
             background: #e8f5e9;
             color: var(--success);
             font-weight: 500;
+        }
+
+        /* ========== 控制面板样式 ========== */
+        .control-panel {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .control-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 140px;
+            justify-content: center;
+        }
+
+        .control-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .control-btn.start {
+            background: var(--success);
+            color: white;
+        }
+
+        .control-btn.start:hover:not(:disabled) {
+            background: #2db84d;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(52, 199, 89, 0.3);
+        }
+
+        .control-btn.stop {
+            background: var(--warning);
+            color: white;
+        }
+
+        .control-btn.stop:hover:not(:disabled) {
+            background: #e68600;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(255, 149, 0, 0.3);
+        }
+
+        .control-btn.clear {
+            background: var(--error);
+            color: white;
+        }
+
+        .control-btn.clear:hover:not(:disabled) {
+            background: #e6352b;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(255, 59, 48, 0.3);
+        }
+
+        .control-btn svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        .measuring-indicator {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 16px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .measuring-indicator.active {
+            color: var(--success);
+        }
+
+        .measuring-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+        }
+
+        .measuring-indicator.active .measuring-dot {
+            background: var(--success);
+            animation: pulse 1s infinite;
         }
 
         .distance-display {
@@ -754,6 +910,12 @@ if __name__ == "__main__":
             .two-col {
                 grid-template-columns: 1fr;
             }
+            .control-panel {
+                flex-direction: column;
+            }
+            .control-btn {
+                width: 100%;
+            }
         }
 
         /* ========== 悬浮提示框样式 ========== */
@@ -954,6 +1116,37 @@ if __name__ == "__main__":
             width: 14px;
             height: 14px;
         }
+
+        /* Toast 通知 */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--text);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 3000;
+            opacity: 0;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .toast.success {
+            background: var(--success);
+        }
+
+        .toast.error {
+            background: var(--error);
+        }
     </style>
 </head>
 <body>
@@ -973,6 +1166,37 @@ if __name__ == "__main__":
             </div>
         </div>
 
+        <!-- 控制面板 -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">测距控制</span>
+            </div>
+            <div class="control-panel">
+                <button class="control-btn start" id="btnStart" onclick="startMeasuring()">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M8 5v14l11-7z"/>
+                    </svg>
+                    开始测距
+                </button>
+                <button class="control-btn stop" id="btnStop" onclick="stopMeasuring()" disabled>
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M6 6h12v12H6z"/>
+                    </svg>
+                    停止测距
+                </button>
+                <button class="control-btn clear" id="btnClear" onclick="clearAndStop()">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                    </svg>
+                    停止并清空
+                </button>
+            </div>
+            <div class="measuring-indicator" id="measuringIndicator">
+                <span class="measuring-dot"></span>
+                <span id="measuringText">未开始测距</span>
+            </div>
+        </div>
+
         <div class="card">
             <div class="card-header">
                 <span class="card-title">测距结果</span>
@@ -982,7 +1206,7 @@ if __name__ == "__main__":
                 <span class="distance-value placeholder" id="distanceValue">--</span>
                 <span class="distance-unit">m</span>
                 <div class="distance-sub">
-                    原始值: <span id="rawValue">--</span> m
+                     <span id="rawValue">--</span>
                 </div>
             </div>
         </div>
@@ -1091,6 +1315,9 @@ if __name__ == "__main__":
     <!-- 隐藏的音频播放器 -->
     <audio id="audioPlayer" style="display: none;"></audio>
 
+    <!-- Toast 通知 -->
+    <div class="toast" id="toast"></div>
+
     <script>
         const API_URL = '/api/status';
         const MAX_CHART_POINTS = 50;
@@ -1098,11 +1325,14 @@ if __name__ == "__main__":
         // 图表数据
         let chartLabels = [];
         let chartData = [];
-        let chartHistory = [];  // 存储完整的历史数据用于tooltip
+        let chartHistory = [];
 
         // 当前选中的数据点
         let selectedPoint = null;
         let currentAudioFile = null;
+
+        // 测距状态
+        let isMeasuring = false;
 
         // DOM元素
         const tooltip = document.getElementById('tooltip');
@@ -1110,6 +1340,7 @@ if __name__ == "__main__":
         const modalBody = document.getElementById('modalBody');
         const modalTitle = document.getElementById('modalTitle');
         const audioPlayer = document.getElementById('audioPlayer');
+        const toast = document.getElementById('toast');
 
         // 初始化图表
         const ctx = document.getElementById('distanceChart').getContext('2d');
@@ -1207,6 +1438,90 @@ if __name__ == "__main__":
 
         let lastMeasureCount = 0;
 
+        // ========== 控制函数 ==========
+        function showToast(message, type = 'info') {
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        async function startMeasuring() {
+            try {
+                const resp = await fetch('/api/control/start', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    showToast('测距已开始', 'success');
+                } else {
+                    showToast(data.message || '操作失败', 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            }
+        }
+
+        async function stopMeasuring() {
+            try {
+                const resp = await fetch('/api/control/stop', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    showToast('测距已停止', 'success');
+                } else {
+                    showToast(data.message || '操作失败', 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            }
+        }
+
+        async function clearAndStop() {
+            try {
+                const resp = await fetch('/api/control/clear', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    // 清空前端图表数据
+                    chartLabels.length = 0;
+                    chartData.length = 0;
+                    chartHistory.length = 0;
+                    distanceChart.update();
+                    lastMeasureCount = 0;
+                    showToast('已停止并清空数据', 'success');
+                } else {
+                    showToast(data.message || '操作失败', 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            }
+        }
+
+        function updateControlButtons(connected, measuring) {
+            const btnStart = document.getElementById('btnStart');
+            const btnStop = document.getElementById('btnStop');
+            const btnClear = document.getElementById('btnClear');
+            const indicator = document.getElementById('measuringIndicator');
+            const indicatorText = document.getElementById('measuringText');
+
+            // 开始按钮：已连接且未测距时可用
+            btnStart.disabled = !connected || measuring;
+            
+            // 停止按钮：正在测距时可用
+            btnStop.disabled = !measuring;
+            
+            // 清空按钮：始终可用
+            btnClear.disabled = false;
+
+            // 更新测距状态指示
+            if (measuring) {
+                indicator.classList.add('active');
+                indicatorText.textContent = '正在测距...';
+            } else {
+                indicator.classList.remove('active');
+                indicatorText.textContent = connected ? '就绪，点击开始' : '等待设备连接';
+            }
+        }
+
         function showTooltip(index, event) {
             const data = chartHistory[index];
             if (!data) return;
@@ -1214,7 +1529,6 @@ if __name__ == "__main__":
             selectedPoint = data;
             currentAudioFile = data.audio_file;
 
-            // 更新tooltip内容
             document.getElementById('tooltipHeader').textContent = `测量 @ ${data.time}`;
             document.getElementById('tooltipContent').innerHTML = `
                 <div class="tooltip-row">
@@ -1239,7 +1553,6 @@ if __name__ == "__main__":
                 </div>
             `;
 
-            // 设置按钮状态
             const btnPlay = document.getElementById('btnPlayAudio');
             const btnAnalysis = document.getElementById('btnShowAnalysis');
             
@@ -1251,8 +1564,6 @@ if __name__ == "__main__":
                 btnAnalysis.disabled = true;
             }
 
-            // 定位tooltip
-            const chartRect = document.getElementById('distanceChart').getBoundingClientRect();
             const x = event.native.clientX;
             const y = event.native.clientY;
 
@@ -1260,7 +1571,6 @@ if __name__ == "__main__":
             tooltip.style.left = `${x + 15}px`;
             tooltip.style.top = `${y - 10}px`;
 
-            // 确保tooltip不超出屏幕
             const tooltipRect = tooltip.getBoundingClientRect();
             if (tooltipRect.right > window.innerWidth) {
                 tooltip.style.left = `${x - tooltipRect.width - 15}px`;
@@ -1275,14 +1585,12 @@ if __name__ == "__main__":
             selectedPoint = null;
         }
 
-        // 点击页面其他区域隐藏tooltip
         document.addEventListener('click', (e) => {
             if (!tooltip.contains(e.target) && e.target.id !== 'distanceChart') {
                 hideTooltip();
             }
         });
 
-        // 播放音频按钮
         document.getElementById('btnPlayAudio').addEventListener('click', () => {
             if (currentAudioFile) {
                 audioPlayer.src = `/api/audio/${currentAudioFile}`;
@@ -1290,11 +1598,9 @@ if __name__ == "__main__":
             }
         });
 
-        // 显示分析图像按钮
         document.getElementById('btnShowAnalysis').addEventListener('click', async () => {
             if (!currentAudioFile) return;
 
-            // 显示模态框
             modalOverlay.classList.add('active');
             modalTitle.textContent = `音频分析 - ${currentAudioFile}`;
             modalBody.innerHTML = `
@@ -1305,7 +1611,6 @@ if __name__ == "__main__":
             `;
 
             try {
-                // 请求分析图像（会自动生成如果不存在）
                 const response = await fetch(`/api/analysis/${currentAudioFile}`);
                 if (response.ok) {
                     const blob = await response.blob();
@@ -1330,7 +1635,6 @@ if __name__ == "__main__":
             hideTooltip();
         });
 
-        // 关闭模态框
         document.getElementById('modalClose').addEventListener('click', () => {
             modalOverlay.classList.remove('active');
         });
@@ -1341,7 +1645,6 @@ if __name__ == "__main__":
             }
         });
 
-        // ESC键关闭
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 modalOverlay.classList.remove('active');
@@ -1349,82 +1652,6 @@ if __name__ == "__main__":
             }
         });
 
-        function updateUI(data) {
-            // 连接状态
-            const dot = document.getElementById('connDot');
-            const text = document.getElementById('connText');
-            dot.className = 'status-dot ' + (data.connected ? 'online' : 'waiting');
-            text.textContent = data.connected ? '目标设备已连接' : '等待连接';
-
-            // 距离
-            const distEl = document.getElementById('distanceValue');
-            if (data.distance !== null) {
-                distEl.textContent = data.distance.toFixed(2);
-                distEl.classList.remove('placeholder');
-            } else {
-                distEl.textContent = '--';
-                distEl.classList.add('placeholder');
-            }
-            document.getElementById('rawValue').textContent = data.raw_distance !== null ? data.raw_distance.toFixed(2) : '--';
-            document.getElementById('updateBadge').textContent = data.last_update || '--';
-
-            // 信号质量
-            setCorrelation('corrA', 'corrABar', data.corr_A);
-            setCorrelation('corrB', 'corrBBar', data.corr_B);
-
-            // 统计
-            document.getElementById('jitter').textContent = data.jitter.toFixed(3) + ' m';
-            document.getElementById('count').textContent = data.measure_count;
-            document.getElementById('fps').textContent = data.fps.toFixed(1) + ' Hz';
-            document.getElementById('deltaT').textContent = (data.t_B - data.t_A).toFixed(3) + 's';
-
-            // 更新图表（仅当有新数据时）
-            if (data.measure_count > lastMeasureCount && data.distance !== null) {
-                lastMeasureCount = data.measure_count;
-                
-                // 从history获取最新的数据点
-                const latestData = data.history[0];
-                
-                // 添加新数据点
-                chartLabels.push(data.last_update);
-                chartData.push(data.distance);
-                chartHistory.push(latestData);
-                
-                // 限制数据点数量
-                if (chartLabels.length > MAX_CHART_POINTS) {
-                    chartLabels.shift();
-                    chartData.shift();
-                    chartHistory.shift();
-                }
-                
-                distanceChart.update('none');
-                document.getElementById('chartPoints').textContent = chartData.length + ' 点';
-            }
-
-            // 历史记录（带音频标记）
-            const histList = document.getElementById('historyList');
-            if (data.history && data.history.length > 0) {
-                histList.innerHTML = data.history.map((h, idx) => {
-                    const valueClass = h.distance < 10 ? 'good' : (h.distance < 50 ? '' : 'warning');
-                    const audioIcon = h.audio_file ? `
-                        <span class="audio-indicator" title="有音频记录">
-                            <svg viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M12 3v18l-7-5.5V8.5L12 3zm1 0v18l7-5.5V8.5L13 3z"/>
-                            </svg>
-                        </span>
-                    ` : '';
-                    return `
-                        <div class="history-item" data-index="${idx}" onclick="showHistoryDetail(${idx})">
-                            <span class="history-time">${h.time}${audioIcon}</span>
-                            <span class="history-value ${valueClass}">${h.distance.toFixed(3)} m</span>
-                        </div>
-                    `;
-                }).join('');
-                document.getElementById('historyCount').textContent = data.history.length + ' 条';
-            }
-        }
-
-        // 点击历史记录项显示详情
         let historyData = [];
         function showHistoryDetail(index) {
             const data = historyData[index];
@@ -1432,7 +1659,6 @@ if __name__ == "__main__":
 
             currentAudioFile = data.audio_file;
             
-            // 显示模态框
             modalOverlay.classList.add('active');
             modalTitle.textContent = `音频分析 - ${data.audio_file}`;
             modalBody.innerHTML = `
@@ -1460,6 +1686,85 @@ if __name__ == "__main__":
                 });
         }
 
+        function updateUI(data) {
+            // 连接状态
+            const dot = document.getElementById('connDot');
+            const text = document.getElementById('connText');
+            dot.className = 'status-dot ' + (data.connected ? 'online' : 'waiting');
+            text.textContent = data.connected ? '目标设备已连接' : '等待连接';
+
+            // 更新控制按钮状态
+            updateControlButtons(data.connected, data.measuring);
+
+            // 距离
+            const distEl = document.getElementById('distanceValue');
+            if (data.distance !== null) {
+                distEl.textContent = data.distance.toFixed(2);
+                distEl.classList.remove('placeholder');
+            } else {
+                distEl.textContent = '--';
+                distEl.classList.add('placeholder');
+            }
+            document.getElementById('rawValue').textContent = data.raw_distance !== null ? data.raw_distance.toFixed(2) : '--';
+            document.getElementById('updateBadge').textContent = data.last_update || '--';
+
+            // 信号质量
+            setCorrelation('corrA', 'corrABar', data.corr_A);
+            setCorrelation('corrB', 'corrBBar', data.corr_B);
+
+            // 统计
+            document.getElementById('jitter').textContent = data.jitter.toFixed(3) + ' m';
+            document.getElementById('count').textContent = data.measure_count;
+            document.getElementById('fps').textContent = data.fps.toFixed(1) + ' Hz';
+            document.getElementById('deltaT').textContent = (data.t_B - data.t_A).toFixed(3) + 's';
+
+            // 更新图表
+            if (data.measure_count > lastMeasureCount && data.distance !== null) {
+                lastMeasureCount = data.measure_count;
+                
+                const latestData = data.history[0];
+                
+                chartLabels.push(data.last_update);
+                chartData.push(data.distance);
+                chartHistory.push(latestData);
+                
+                if (chartLabels.length > MAX_CHART_POINTS) {
+                    chartLabels.shift();
+                    chartData.shift();
+                    chartHistory.shift();
+                }
+                
+                distanceChart.update('none');
+                document.getElementById('chartPoints').textContent = chartData.length + ' 点';
+            }
+
+            // 历史记录
+            historyData = data.history || [];
+            const histList = document.getElementById('historyList');
+            if (data.history && data.history.length > 0) {
+                histList.innerHTML = data.history.map((h, idx) => {
+                    const valueClass = h.distance < 10 ? 'good' : (h.distance < 50 ? '' : 'warning');
+                    const audioIcon = h.audio_file ? `
+                        <span class="audio-indicator" title="有音频记录">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 3v18l-7-5.5V8.5L12 3zm1 0v18l7-5.5V8.5L13 3z"/>
+                            </svg>
+                        </span>
+                    ` : '';
+                    return `
+                        <div class="history-item" data-index="${idx}" onclick="showHistoryDetail(${idx})">
+                            <span class="history-time">${h.time}${audioIcon}</span>
+                            <span class="history-value ${valueClass}">${h.distance.toFixed(3)} m</span>
+                        </div>
+                    `;
+                }).join('');
+                document.getElementById('historyCount').textContent = data.history.length + ' 条';
+            } else {
+                histList.innerHTML = '<div class="empty-state">暂无数据</div>';
+                document.getElementById('historyCount').textContent = '0 条';
+            }
+        }
+
         function setCorrelation(valId, barId, val) {
             const el = document.getElementById(valId);
             const bar = document.getElementById(barId);
@@ -1483,7 +1788,6 @@ if __name__ == "__main__":
             try {
                 const resp = await fetch(API_URL);
                 const data = await resp.json();
-                historyData = data.history || [];  // 保存历史数据供详情使用
                 updateUI(data);
             } catch (e) {
                 console.error('Fetch error:', e);
@@ -1822,6 +2126,8 @@ class TargetState:
         self.distance = None
         self.raw_distance = None
         self.distance_history = []
+        # 新增：数据清空标记，用于通知前端
+        self.data_version = 0
     
     def update_signal(self, corr_A, corr_B, t_A, t_B, delta_samples, audio_file=None):
         with self._lock:
@@ -1882,6 +2188,31 @@ class TargetState:
             if len(self.logs) > 100:
                 self.logs.pop()
     
+    def clear_data(self):
+        """清空所有测距数据"""
+        with self._lock:
+            self.corr_A = 0.0
+            self.corr_B = 0.0
+            self.t_A = 0.0
+            self.t_B = 0.0
+            self.delta_samples = 0
+            self.delta_time = 0.0
+            self.measure_count = 0
+            self.last_update = None
+            self.distance = None
+            self.raw_distance = None
+            self.distance_history = []
+            self.logs = []
+            self.data_version += 1  # 增加版本号，通知前端数据已清空
+            
+            # 添加清空日志
+            self.logs.insert(0, {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": "INFO",
+                "msg": "数据已被锚节点清空",
+                "audio_file": None
+            })
+    
     def get_state(self):
         with self._lock:
             return {
@@ -1899,7 +2230,8 @@ class TargetState:
                 "logs": self.logs,
                 "distance": round(self.distance, 3) if self.distance is not None else None,
                 "raw_distance": round(self.raw_distance, 3) if self.raw_distance is not None else None,
-                "distance_history": self.distance_history
+                "distance_history": self.distance_history,
+                "data_version": self.data_version  # 新增：数据版本号
             }
 
 state = TargetState()
@@ -2034,6 +2366,13 @@ class TargetDevice:
                 continue
             
             cmd = msg.get('cmd')
+            
+            # 处理CLEAR命令 - 清空数据
+            if cmd == 'CLEAR':
+                logger.info("收到CLEAR命令，清空数据")
+                state.clear_data()
+                state.add_log("INFO", "收到锚节点清空指令")
+                continue
             
             # 处理距离更新消息
             if cmd == 'DISTANCE':
@@ -2666,6 +3005,37 @@ if __name__ == "__main__":
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        /* Toast 通知 */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--text);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 3000;
+            opacity: 0;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .toast.info {
+            background: var(--accent);
+        }
+
+        .toast.warning {
+            background: var(--warning);
+        }
     </style>
 </head>
 <body>
@@ -2798,6 +3168,9 @@ if __name__ == "__main__":
     <!-- 隐藏的音频播放器 -->
     <audio id="audioPlayer" style="display: none;"></audio>
 
+    <!-- Toast 通知 -->
+    <div class="toast" id="toast"></div>
+
     <script>
         const API_URL = '/api/status';
         const MAX_CHART_POINTS = 50;
@@ -2811,12 +3184,26 @@ if __name__ == "__main__":
         let selectedPoint = null;
         let currentAudioFile = null;
 
+        // 用于检测数据清空 - 使用 null 表示未初始化
+        let lastDataVersion = null;
+
         // DOM元素
         const tooltip = document.getElementById('tooltip');
         const modalOverlay = document.getElementById('modalOverlay');
         const modalBody = document.getElementById('modalBody');
         const modalTitle = document.getElementById('modalTitle');
         const audioPlayer = document.getElementById('audioPlayer');
+        const toast = document.getElementById('toast');
+
+        // Toast 通知函数
+        function showToast(message, type = 'info') {
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
 
         // 初始化图表
         const ctx = document.getElementById('distanceChart').getContext('2d');
@@ -3079,7 +3466,46 @@ if __name__ == "__main__":
                 });
         }
 
+        // 清空图表数据的函数
+        function clearChartData() {
+            // 清空数组内容（保持引用）
+            chartLabels.length = 0;
+            chartData.length = 0;
+            chartHistory.length = 0;
+            
+            // 重置测量计数
+            lastMeasureCount = 0;
+            
+            // 更新图表显示
+            distanceChart.update('none');
+            
+            // 更新UI显示
+            document.getElementById('chartPoints').textContent = '0 点';
+            document.getElementById('distanceValue').textContent = '--';
+            document.getElementById('distanceValue').classList.add('placeholder');
+            document.getElementById('updateBadge').textContent = '--';
+            
+            // 显示提示
+            showToast('数据已被锚节点清空', 'warning');
+            
+            console.log('[Target] 图表数据已清空');
+        }
+
         function updateUI(data) {
+            // ========== 关键修改：检查数据版本 ==========
+            if (data.data_version !== undefined) {
+                if (lastDataVersion === null) {
+                    // 首次加载，仅记录版本号，不清空
+                    lastDataVersion = data.data_version;
+                    console.log('[Target] 初始化 data_version:', lastDataVersion);
+                } else if (data.data_version !== lastDataVersion) {
+                    // 版本变化，说明后端数据已清空，需要清空前端
+                    console.log('[Target] data_version 变化:', lastDataVersion, '->', data.data_version);
+                    lastDataVersion = data.data_version;
+                    clearChartData();
+                }
+            }
+
             // 连接状态
             const dot = document.getElementById('connDot');
             const text = document.getElementById('connText');
@@ -3111,15 +3537,17 @@ if __name__ == "__main__":
             document.getElementById('deltaSamples').textContent = data.delta_samples.toLocaleString();
             document.getElementById('count').textContent = data.measure_count;
 
-            // 更新图表
+            // 更新图表 - 仅当有新数据时
             if (data.measure_count > lastMeasureCount && data.distance !== null && data.distance !== undefined) {
                 lastMeasureCount = data.measure_count;
                 
-                const latestData = data.distance_history[0];
+                const latestData = data.distance_history && data.distance_history[0] 
+                    ? data.distance_history[0] 
+                    : { time: data.last_update, distance: data.distance };
                 
                 chartLabels.push(data.last_update);
                 chartData.push(data.distance);
-                chartHistory.push(latestData || { time: data.last_update, distance: data.distance });
+                chartHistory.push(latestData);
                 
                 if (chartLabels.length > MAX_CHART_POINTS) {
                     chartLabels.shift();
@@ -3148,6 +3576,9 @@ if __name__ == "__main__":
                     </div>`;
                 }).join('');
                 document.getElementById('logCount').textContent = logsData.length + ' 条';
+            } else {
+                logEl.innerHTML = '<div class="empty-state">等待数据...</div>';
+                document.getElementById('logCount').textContent = '0 条';
             }
         }
 

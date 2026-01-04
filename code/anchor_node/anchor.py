@@ -17,7 +17,7 @@ from common.net_transport import AnchorServer, logger
 
 # === 调试配置 ===
 SAVE_AUDIO = True
-DISTANCE_OFFSET = 1.20
+DISTANCE_OFFSET = 3.10
 WEB_PORT = 8080
 
 # === JSON记录配置 ===
